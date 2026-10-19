@@ -20,51 +20,41 @@ jobs:
             mv lsplant dobby xdl zygisk third_party/ 2>/dev/null || true
         fi
 
-    - name: 3. 下载 ShadowHook 源码 (智能识别目录名)
+    - name: 3. 下载 ShadowHook 源码
       run: |
         mkdir -p third_party
-        echo "下载 ShadowHook (main 分支)..."
         wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
-        
         if [ -f shadowhook.zip ]; then
             unzip -q shadowhook.zip
             EXTRACTED_DIR=$(ls -d */ | grep -E "android-inline-hook" | head -n 1)
             if [ -n "$EXTRACTED_DIR" ]; then
                 mv "$EXTRACTED_DIR" third_party/shadowhook
-                echo "✅ 成功将 $EXTRACTED_DIR 重命名为 third_party/shadowhook"
-            else
-                echo "❌ 找不到解压出来的 ShadowHook 目录！"
-                ls -la
-                exit 1
             fi
-        else
-            echo "❌ 下载失败，请检查网络！"
-            exit 1
         fi
 
-    - name: 4. 准备 NDK
+    - name: 4. 覆盖为经典稳定版 LSPlant (解决 Modules 报错)
+      run: |
+        echo "强制替换为 v1.0.0 经典版 LSPlant..."
+        rm -rf third_party/lsplant
+        wget -q https://github.com/LSPosed/LSPlant/archive/refs/tags/v1.0.0.zip -O lsplant_v1.zip
+        unzip -q lsplant_v1.zip
+        mv LSPlant-1.0.0 third_party/lsplant
+        echo "✅ 已替换为经典版"
+
+    - name: 5. 准备 NDK
       uses: nttld/setup-ndk@v1
       with:
         ndk-version: r25c
 
-    - name: 5. 修补依赖与魔改源码
+    - name: 6. 修补依赖与魔改 CMake
       run: |
-        # 1. 强行把 ShadowHook 的 CMake 版本限制降级，否则会报错
+        # 1. 魔改 ShadowHook 的 CMake 版本限制
         SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
         if [ -f "$SHADOWHOOK_CMAKE" ]; then
             sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
-            echo "✅ 已魔改 ShadowHook 的 CMake 版本限制"
         fi
 
-        # 2. 【核心修复】暴力移除 LSPlant 中的 C++ 20 Modules 语法
-        find third_party/lsplant -name "*.cc" -exec sed -i '/^module lsplant;/d' {} +
-        find third_party/lsplant -name "*.cc" -exec sed -i '/^module;/d' {} +
-        find third_party/lsplant -name "*.cc" -exec sed -i 's/^export //g' {} +
-        find third_party/lsplant -name "*.hpp" -exec sed -i 's/^export //g' {} +
-        find third_party/lsplant -name "*.h" -exec sed -i 's/^export //g' {} +
-        echo "✅ 已暴力移除 LSPlant 的 Modules 语法"
-
-        # 3. 修补 LSPlant 的 xz 依赖
+        # 2. 修补 LSPlant 的 xz 依赖
         find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
         find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
         
@@ -98,12 +88,11 @@ jobs:
         EOF
         fi
 
-    - name: 6. 生成 CMakeLists.txt (集成 ShadowHook 静态库)
+    - name: 7. 生成 CMakeLists.txt
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
-        # 降级为 C++17，彻底断绝 Modules 念想
         set(CMAKE_CXX_STANDARD 17)
         
         include_directories(
@@ -111,8 +100,6 @@ jobs:
             ${CMAKE_SOURCE_DIR}/third_party/xdl/include
             ${CMAKE_SOURCE_DIR}/third_party/xdl/src
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
             ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
         )
         
@@ -125,24 +112,19 @@ jobs:
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 2. LSPlant
-        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
-        set(LSPLANT_STUB_C "")
-        if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/utils/xz_stub.c")
-            set(LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/utils/xz_stub.c")
-        elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
-            set(LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
-        endif()
+        # 2. LSPlant (v1.0.0 结构非常规整)
+        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/*.cc")
+        file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
         add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
         target_link_libraries(lsplant xdl)
 
-        # 3. Zygisk 模块 (链接 ShadowHook)
+        # 3. Zygisk 模块
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
         EOF
 
-    - name: 7. 生成 zygisk.cpp 和 zygisk.hpp (使用 ShadowHook)
+    - name: 8. 生成 zygisk.cpp 和 zygisk.hpp
       run: |
         cat << 'EOF' > zygisk.hpp
         #pragma once
@@ -200,7 +182,6 @@ jobs:
         #include <netinet/in.h>
         #include <mutex>
         #include <string>
-        #include <sys/mman.h>
 
         #include "zygisk.hpp"
         #include "lsplant.hpp"
@@ -227,7 +208,6 @@ jobs:
         static fp_rule g_currentRule;
         static bool g_hasRule = false;
 
-        // 使用 ShadowHook 进行内联 Hook
         void* inline_hooker(void* target, void* hooker) {
             return shadowhook_hook_func_addr(target, hooker, nullptr);
         }
@@ -330,7 +310,7 @@ jobs:
         JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
         EOF
 
-    - name: 8. 编译 Zygisk 模块
+    - name: 9. 编译 Zygisk 模块
       run: |
         mkdir build && cd build
         cmake .. \
@@ -340,7 +320,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
         make
 
-    - name: 9. 打包成 Magisk / KernelSU 模块 Zip
+    - name: 10. 打包成 Magisk / KernelSU 模块 Zip
       run: |
         mkdir -p module/zygisk/arm64-v8a
         cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
@@ -357,7 +337,7 @@ jobs:
         cd module
         zip -r ../FP_Zygisk_Module.zip *
 
-    - name: 10. 上传模块压缩包 (Artifact)
+    - name: 11. 上传模块压缩包 (Artifact)
       uses: actions/upload-artifact@v4
       with:
         name: FP_Zygisk_Module

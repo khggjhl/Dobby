@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (LSPlant 最终稳定版)
+name: 一键编译 Zygisk 模块 (终极断网免疫版)
 
 on:
   workflow_dispatch:
@@ -15,33 +15,28 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载依赖 (带重试机制，防断连)
+    - name: 2. 下载依赖 (强制使用 wget 稳定下载)
       run: |
         mkdir -p third_party
+        cd third_party
         
-        for i in {1..5}; do
-          git clone --depth 1 https://github.com/LSPosed/LSPlant.git third_party/lsplant && break
-          echo "LSPlant 下载失败，重试中..."
-          sleep 3
-        done
+        echo "下载 LSPlant..."
+        wget -q https://github.com/LSPosed/LSPlant/archive/refs/heads/master.zip -O lsplant.zip
+        unzip -q lsplant.zip && mv LSPlant-master lsplant
         
-        for i in {1..5}; do
-          git clone --depth 1 https://github.com/jmpews/Dobby.git third_party/dobby && break
-          echo "Dobby 下载失败，重试中..."
-          sleep 3
-        done
+        echo "下载 Dobby..."
+        wget -q https://github.com/jmpews/Dobby/archive/refs/heads/master.zip -O dobby.zip
+        unzip -q dobby.zip && mv Dobby-master dobby
         
-        for i in {1..5}; do
-          git clone --depth 1 https://github.com/hexhacking/xDL.git third_party/xdl && break
-          echo "xdl 下载失败，重试中..."
-          sleep 3
-        done
+        echo "下载 xdl..."
+        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
+        unzip -q xdl.zip && mv xDL-master xdl
         
-        echo "===== 检查源码目录结构 ====="
-        echo "xdl 根目录:" && ls third_party/xdl/
-        echo "xdl src 目录:" && ls third_party/xdl/src/ | head -n 5
-        echo "lsplant 源码目录:" && ls third_party/lsplant/lsplant/src/main/cpp/ | head -n 5
-        echo "==========================="
+        cd ..
+        echo "===== 检查源码是否就位 ====="
+        echo "--- LSPlant 源码 ---" && ls third_party/lsplant/lsplant/src/main/cpp/
+        echo "--- xdl 源码 ---" && ls third_party/xdl/src/main/cpp/
+        echo "============================"
 
     - name: 3. 生成 zygisk.hpp
       run: |
@@ -98,11 +93,12 @@ jobs:
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 20)
         
+        # 包含路径
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            ${CMAKE_SOURCE_DIR}/third_party/dobby/include
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/src
+            ${CMAKE_SOURCE_DIR}/third_party/dobby/include
+            ${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp
         )
         
         # ===== 1. 编译 Dobby =====
@@ -118,10 +114,10 @@ jobs:
         add_library(dobby STATIC ${DOBBY_SOURCES})
         target_link_libraries(dobby log)
 
-        # ===== 2. 编译 xdl (注意：hexhacking/xDL 的源码在 src/ 目录下) =====
-        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/src/*.c")
+        # ===== 2. 编译 xdl =====
+        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp/*.c")
         if(NOT XDL_SOURCES)
-            message(FATAL_ERROR "❌ 致命错误: 找不到 xdl 源码！")
+            message(FATAL_ERROR "❌ 致命错误: 依然找不到 xdl 源码，请检查目录结构！")
         endif()
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
@@ -134,7 +130,6 @@ jobs:
         endif()
         
         add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_XZ_SOURCES})
-        
         target_include_directories(lsplant PRIVATE 
             "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/linux/include"
             "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/userspace"

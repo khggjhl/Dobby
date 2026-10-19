@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (ShadowHook 终极版)
+name: 一键编译 Zygisk 模块 (ShadowHook 智能识别版)
 
 on:
   workflow_dispatch:
@@ -20,13 +20,23 @@ jobs:
             mv lsplant dobby xdl zygisk third_party/ 2>/dev/null || true
         fi
 
-    - name: 3. 下载 ShadowHook 源码
+    - name: 3. 下载 ShadowHook 源码 (智能识别目录名)
       run: |
         mkdir -p third_party
-        # 下载 ShadowHook (字节跳动 android-inline-hook) 最新稳定版
-        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/master.zip -O shadowhook.zip
+        # 下载最新的 shadowhook 源码
+        wget -q https://github.com/bytedance/shadowhook/archive/refs/heads/master.zip -O shadowhook.zip
         unzip -q shadowhook.zip
-        mv android-inline-hook-master third_party/shadowhook
+        
+        # 智能匹配解压出来的文件夹名字（可能是 shadowhook-master 或 android-inline-hook-master）
+        EXTRACTED_DIR=$(ls -d */ | grep -E "shadowhook|inline-hook" | head -n 1)
+        if [ -n "$EXTRACTED_DIR" ]; then
+            mv "$EXTRACTED_DIR" third_party/shadowhook
+            echo "成功将 $EXTRACTED_DIR 重命名为 third_party/shadowhook"
+        else
+            echo "❌ 找不到解压出来的 ShadowHook 目录！"
+            ls -la
+            exit 1
+        fi
 
     - name: 4. 准备 NDK
       uses: nttld/setup-ndk@v1
@@ -94,7 +104,7 @@ jobs:
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 2. LSPlant (依赖 xdl)
+        # 2. LSPlant
         file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
         set(LSPLANT_STUB_C "")
         if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/utils/xz_stub.c")
@@ -174,7 +184,7 @@ jobs:
         #include "zygisk.hpp"
         #include "lsplant.hpp"
         #include "xdl.h"
-        #include "shadowhook.h" // 引入 ShadowHook 头文件
+        #include "shadowhook.h"
 
         #define TAG "fp-zygisk"
         #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -196,17 +206,12 @@ jobs:
         static fp_rule g_currentRule;
         static bool g_hasRule = false;
 
-        // ==========================================
-        // 核心替换：使用 ShadowHook 进行内联 Hook
-        // ==========================================
+        // 使用 ShadowHook 进行内联 Hook
         void* inline_hooker(void* target, void* hooker) {
-            // shadowhook_hook_func_addr: 通过绝对地址 Hook 一个函数
-            // 返回值: stub 句柄，用于后续 unhook
             return shadowhook_hook_func_addr(target, hooker, nullptr);
         }
 
         bool inline_unhooker(void* stub) {
-            // 释放 ShadowHook 的 hook
             return shadowhook_unhook(stub) == 0;
         }
 
@@ -286,7 +291,6 @@ jobs:
                 // 初始化 ShadowHook
                 shadowhook_init(shadowhook_mode_t::SHADOWHOOK_MODE_SHARED, false);
 
-                // 使用 ShadowHook 初始化 LSPlant
                 lsplant::InitInfo info {
                     .inline_hooker = inline_hooker,
                     .inline_unhooker = inline_unhooker,

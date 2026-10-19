@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (Pine Hook终极通关版)
+name: 一键编译 Zygisk 模块 (Pine Hook胜利版)
 
 on:
   workflow_dispatch:
@@ -95,9 +95,9 @@ jobs:
         void xz_crc32_init(void) {}
         EOF
 
-        # 【修复3】暴力搜索 pine.h 并放到能被找到的根目录
-        find third_party/pine -name "pine.h" -exec cp {} third_party/pine/ \;
-        cp third_party/pine/pine.h . || true
+        # 暴力确保 pine.h 在正确位置
+        echo "===== 检查 Pine 目录结构 ====="
+        ls -R third_party/pine | head -n 50
 
     - name: 3. 生成 zygisk.hpp
       run: |
@@ -154,7 +154,7 @@ jobs:
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
-        # 【修复】把所有可能的目录全加进来，绝对不让它找不到
+        # 把所有可能的目录都加进去
         include_directories(
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
@@ -206,8 +206,17 @@ jobs:
         #include <string>
 
         #include "zygisk.hpp"
-        // 尝试只写文件名，让 CMake 自己去搜索
+        
+        // 【修复】加入保底绝对路径，如果找不到直接引全路径
+        #if __has_include("pine.h")
         #include "pine.h"
+        #elif __has_include("third_party/pine/include/pine.h")
+        #include "third_party/pine/include/pine.h"
+        #elif __has_include("include/pine.h")
+        #include "include/pine.h"
+        #else
+        #error "fatal: pine.h not found anywhere"
+        #endif
 
         #define TAG "fp-zygisk"
         #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)

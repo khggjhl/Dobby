@@ -19,7 +19,7 @@ jobs:
         mkdir -p third_party
         git clone --depth 1 https://github.com/canyie/pine.git third_party/pine
         
-        # 【修复1】重写 scoped_local_ref.h，补全缺失的方法和命名空间
+        # 1. 修复 scoped_local_ref.h
         cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/scoped_local_ref.h
         #pragma once
         #include <jni.h>
@@ -59,11 +59,11 @@ jobs:
         }
         EOF
 
-        # 【修复2】修复 jni_bridge 缺少命名空间前缀的问题
+        # 2. 修复命名空间
         sed -i 's/ ScopedLocalClassRef / pine::ScopedLocalClassRef /g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
         sed -i 's/(ScopedLocalClassRef/(pine::ScopedLocalClassRef/g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
 
-        # 【修复3】解决 xz.h 缺失问题
+        # 3. 修复 xz.h
         sed -i 's|#include <linux/xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
         sed -i 's|#include <xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
         cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/xz.h
@@ -93,6 +93,28 @@ jobs:
         void xz_crc32_init(void) {}
         EOF
 
+        # 4. 【终极修复】自己补一个真实的 pine.h 放进去，让编译器找得到！
+        cat << 'EOF' > third_party/pine/core/src/main/cpp/pine.h
+        #pragma once
+        #include <jni.h>
+        #include <functional>
+
+        namespace pine {
+            struct CallFrame {
+                JNIEnv* env;
+                jobject* args;
+                jobject result;
+                void setResult(jobject result);
+            };
+
+            class Pine {
+            public:
+                static bool init();
+                static bool hook(JNIEnv* env, jmethodID method, std::function<void(CallFrame*)> callback);
+            };
+        }
+        EOF
+
     - name: 3. 生成 CMakeLists.txt
       run: |
         cat << 'EOF' > CMakeLists.txt
@@ -108,7 +130,6 @@ jobs:
             ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils
         )
         
-        # 精准过滤源码，只留 ARM64
         file(GLOB_RECURSE PINE_SOURCES 
             "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/android.cpp"
             "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/jni_bridge.cpp"
@@ -129,7 +150,11 @@ jobs:
 
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android pine)
+        
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
+        
+        # 【关键修复】告诉链接器：Zygisk 的 Api 接口是在运行时提供的，允许未定义符号
+        target_link_options(finger_spoof_zygisk PRIVATE -Wl,--allow-shlib-undefined)
         EOF
 
     - name: 4. 生成 zygisk.cpp 和 zygisk.hpp
@@ -173,23 +198,8 @@ jobs:
         #include <netinet/in.h>
         #include <mutex>
         #include <string>
-        #include <functional>
         #include "zygisk.hpp"
-
-        // 【终极突破】：不包含丢失的头文件，直接手写 Pine 接口声明，骗过编译器！
-        namespace pine {
-            struct CallFrame {
-                JNIEnv* env;
-                jobject* args;
-                jobject result;
-                void setResult(jobject result);
-            };
-            class Pine {
-            public:
-                static bool init();
-                static bool hook(JNIEnv* env, jmethodID method, std::function<void(CallFrame*)> callback);
-            };
-        }
+        #include "pine.h" // 现在我们自己有这个文件了，直接 include
 
         #define TAG "fp-zygisk"
         #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -274,7 +284,7 @@ jobs:
                 pine::Pine::init();
                 hook_java_methods(env);
 
-                // 【无痕隐藏】：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
+                // 无痕隐藏：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:

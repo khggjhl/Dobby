@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (预编译终极稳定版)
+name: 一键编译 Zygisk 模块 (LSPlant 无痕隐藏版)
 
 on:
   workflow_dispatch:
@@ -9,81 +9,109 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - name: 1. 检出并解压你的依赖包
-      uses: actions/checkout@v4
-      
-    - name: 2. 解压 third_party.zip
-      run: |
-        unzip -q third_party.zip
-        if [ ! -d "third_party" ]; then
-            mkdir -p third_party
-            mv lsplant dobby xdl zygisk third_party/ 2>/dev/null || true
-        fi
-
-    - name: 3. 下载官方预编译库 (免去源码编译报错)
-      run: |
-        mkdir -p third_party/prebuilt/lsplant
-        mkdir -p third_party/prebuilt/shadowhook
-        
-        # 从 Maven 官方源下载 LSPlant 预编译包
-        echo "下载 LSPlant 预编译包..."
-        wget -q https://repo1.maven.org/maven2/org/lsposed/lsplant/lsplant-standalone/6.4/lsplant-standalone-6.4.aar -O lsplant.aar
-        unzip -q lsplant.aar -d third_party/prebuilt/lsplant
-        
-        # 从 Maven 官方源下载 ShadowHook 预编译包
-        echo "下载 ShadowHook 预编译包..."
-        wget -q https://repo1.maven.org/maven2/com/bytedance/android/shadowhook/2.0.1/shadowhook-2.0.1.aar -O shadowhook.aar
-        unzip -q shadowhook.aar -d third_party/prebuilt/shadowhook
-
-    - name: 4. 准备 NDK
+    - name: 1. 准备 NDK
       uses: nttld/setup-ndk@v1
       with:
         ndk-version: r25c
 
-    - name: 5. 生成主 CMakeLists.txt
+    - name: 2. 下载并整理依赖源码
+      run: |
+        mkdir -p third_party
+        
+        # 1. 下载完美的 LSPlant v4.3 版本 (不报错，支持 Lambda)
+        echo "下载 LSPlant v4.3..."
+        wget -q https://github.com/LSPosed/LSPlant/archive/refs/tags/v4.3.zip -O lsplant.zip
+        unzip -q lsplant.zip && mv LSPlant-4.3 third_party/lsplant
+        
+        # 2. 下载 ShadowHook (作为底层 Hook 引擎)
+        echo "下载 ShadowHook..."
+        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
+        unzip -q shadowhook.zip && mv android-inline-hook-main third_party/shadowhook
+        
+        # 3. 下载 xdl (用于找符号)
+        echo "下载 xdl..."
+        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
+        unzip -q xdl.zip && mv xDL-master third_party/xdl
+        
+        # 4. 强行修改 ShadowHook 的 CMake 版本限制，防止报错
+        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
+        if [ -f "$SHADOWHOOK_CMAKE" ]; then
+            sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
+        fi
+
+        # 5. 打补丁：去掉 LSPlant 的 xz 依赖
+        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
+        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
+        UTILS_DIR=$(find third_party/lsplant -type d -name "utils" | head -n 1)
+        if [ -n "$UTILS_DIR" ]; then
+            cat << 'EOF' > $UTILS_DIR/xz.h
+        #pragma once
+        #include <stddef.h>
+        #include <stdint.h>
+        #ifdef __cplusplus
+        extern "C" {
+        #endif
+        enum xz_mode { XZ_SINGLE, XZ_PREALLOC, XZ_DYNALLOC };
+        enum xz_ret { XZ_OK, XZ_STREAM_END, XZ_MEMLIMIT_ERROR, XZ_FORMAT_ERROR, XZ_OPTIONS_ERROR, XZ_DATA_ERROR, XZ_BUF_ERROR };
+        struct xz_buf { const uint8_t *in; size_t in_pos; size_t in_size; uint8_t *out; size_t out_pos; size_t out_size; };
+        struct xz_dec;
+        struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max);
+        enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b);
+        void xz_dec_end(struct xz_dec *s);
+        void xz_crc32_init(void);
+        #ifdef __cplusplus
+        }
+        #endif
+        EOF
+            cat << 'EOF' > $UTILS_DIR/xz_stub.c
+        #include "xz.h"
+        struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max) { return 0; }
+        enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b) { return XZ_DATA_ERROR; }
+        void xz_dec_end(struct xz_dec *s) {}
+        void xz_crc32_init(void) {}
+        EOF
+        fi
+
+    - name: 3. 生成 CMakeLists.txt
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
-        # 1. 引入头文件
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
             ${CMAKE_SOURCE_DIR}/third_party/xdl/include
             ${CMAKE_SOURCE_DIR}/third_party/xdl/src
-            # 引用解压出来的预编译头文件
-            ${CMAKE_SOURCE_DIR}/third_party/prebuilt/lsplant/prefab/modules/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/prebuilt/shadowhook/prefab/modules/shadowhook/include
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
         )
         
-        # 2. 链接预编译静态库
-        # LSPlant
-        add_library(lsplant STATIC IMPORTED)
-        set_target_properties(lsplant PROPERTIES IMPORTED_LOCATION
-            ${CMAKE_SOURCE_DIR}/third_party/prebuilt/lsplant/prefab/modules/lsplant/libs/android.arm64-v8a/liblsplant.a
-        )
-        # ShadowHook
-        add_library(shadowhook STATIC IMPORTED)
-        set_target_properties(shadowhook PROPERTIES IMPORTED_LOCATION
-            ${CMAKE_SOURCE_DIR}/third_party/prebuilt/shadowhook/prefab/modules/shadowhook/libs/android.arm64-v8a/libshadowhook.a
-        )
+        set(SHADOWHOOK_STATIC ON CACHE BOOL "")
+        add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
 
-        # 3. xdl 源码(仅用于查找符号，极小)
+        # xdl
         file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 4. Zygisk 模块
+        # LSPlant v4.3
+        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/*.cc")
+        file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
+        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
+        target_link_libraries(lsplant xdl shadowhook)
+
+        # Zygisk 模块
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
-        # 必须加上 c++_shared，因为预编译库是用它编译的
         target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook c++_shared)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
         EOF
 
-    - name: 6. 生成 zygisk.cpp 和 zygisk.hpp
+    - name: 4. 生成 zygisk.hpp
       run: |
-        cat << 'EOF' > zygisk.hpp
+        mkdir -p third_party/zygisk
+        cat << 'EOF' > third_party/zygisk/zygisk.hpp
         #pragma once
         #include <jni.h>
         #include <sys/types.h>
@@ -91,10 +119,7 @@ jobs:
         #include <string_view>
 
         namespace zygisk {
-        struct Api;
-        struct AppSpecializeArgs;
-        struct ServerSpecializeArgs;
-
+        struct Api; struct AppSpecializeArgs; struct ServerSpecializeArgs;
         class ModuleBase {
         public:
             virtual void onLoad(Api *api, JNIEnv *env) {}
@@ -103,7 +128,6 @@ jobs:
             virtual void preServerSpecialize(ServerSpecializeArgs *args) {}
             virtual void postServerSpecialize(const ServerSpecializeArgs *args) {}
         };
-
         struct AppSpecializeArgs {
             jstring nice_name; jstring app_data_dir; const char *const *args;
             jint *uid; jint *gid; jintArray *gids; jint *runtime_flags;
@@ -111,15 +135,12 @@ jobs:
             const char *const *app_path; jstring *app_lib_dir;
             const char *const *permitted_paths; jint *mount_external; jstring *se_info;
         };
-
         struct ServerSpecializeArgs { jint *uid; jint *gid; jintArray *gids; jint *runtime_flags; };
-
         struct Api {
             void connectCompanion(int pid); void connectCompanion();
             int getModuleDir(); void setOption(int opt);
             enum Option { DLCLOSE_MODULE_LIBRARY = 0 };
         };
-
         #define REGISTER_ZYGISK_MODULE(cls) \
             extern "C" __attribute__((visibility("default"))) void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { \
                 static cls module; module.onLoad(api, env); \
@@ -128,6 +149,8 @@ jobs:
         }
         EOF
 
+    - name: 5. 生成核心 zygisk.cpp
+      run: |
         cat << 'EOF' > zygisk.cpp
         #include <jni.h>
         #include <android/log.h>
@@ -139,7 +162,6 @@ jobs:
         #include <netinet/in.h>
         #include <mutex>
         #include <string>
-
         #include "zygisk.hpp"
         #include "lsplant.hpp"
         #include "xdl.h"
@@ -151,17 +173,12 @@ jobs:
         using zygisk::Api;
         using zygisk::AppSpecializeArgs;
 
-        #define FP_FIELD_MAX      18
-        #define FP_NAME_MAX       128
-        #define FP_VALUE_MAX      256
-        #define FP_FIELD_COUNT    (FP_FIELD_MAX)
-        #define FP_MAGIC          0x70
-        #define FP_CMD_GET_RULE   0xC0707006L 
+        #define FP_MAGIC 0x70
+        #define FP_CMD_GET_RULE 0xC0707006L 
 
-        struct fp_field_value { char fake[FP_VALUE_MAX]; unsigned int len; };
-        struct fp_rule { unsigned int uid; char package[FP_NAME_MAX]; struct fp_field_value fields[FP_FIELD_COUNT]; };
+        struct fp_field_value { char fake[256]; unsigned int len; };
+        struct fp_rule { unsigned int uid; char package[128]; struct fp_field_value fields[18]; };
 
-        static std::mutex g_lock;
         static fp_rule g_currentRule;
         static bool g_hasRule = false;
 
@@ -186,21 +203,20 @@ jobs:
             if (fd < 0) return;
             struct fp_rule req; memset(&req, 0, sizeof(req)); req.uid = uid;
             if (ioctl(fd, FP_CMD_GET_RULE, &req) == 0) {
-                std::lock_guard<std::mutex> lk(g_lock);
                 g_currentRule = req; g_hasRule = true;
             }
             close(fd);
         }
 
         static std::string get_fake(int field) {
-            std::lock_guard<std::mutex> lk(g_lock);
-            if (!g_hasRule || field < 0 || field >= FP_FIELD_COUNT) return "";
+            if (!g_hasRule || field < 0 || field >= 18) return "";
             const auto &fv = g_currentRule.fields[field];
             if (fv.len == 0) return "";
             return std::string(fv.fake, fv.len);
         }
 
         static void hook_java_methods(JNIEnv *env) {
+            // 伪装 Android ID
             std::string fake_id = get_fake(1); 
             if (!fake_id.empty()) {
                 jclass secureClass = env->FindClass("android/provider/Settings$Secure");
@@ -223,6 +239,7 @@ jobs:
                 }
             }
             
+            // 伪装 IMEI
             std::string fake_imei = get_fake(2);
             if (!fake_imei.empty()) {
                 jclass tmClass = env->FindClass("android/telephony/TelephonyManager");
@@ -257,6 +274,8 @@ jobs:
                 
                 hook_java_methods(env);
 
+                // 【核心隐蔽点】：Hook 完成后，直接从内存映射中卸载我们的 .so
+                // 游戏反作弊去扫 /proc/self/maps 时，根本找不到 liboplus_sensor.so
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:
@@ -267,17 +286,13 @@ jobs:
         JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
         EOF
 
-    - name: 7. 编译 Zygisk 模块
+    - name: 6. 编译
       run: |
         mkdir build && cd build
-        cmake .. \
-          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-          -DANDROID_ABI=arm64-v8a \
-          -DANDROID_PLATFORM=android-30 \
-          -DCMAKE_BUILD_TYPE=Release
+        cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30
         make
 
-    - name: 8. 打包成 Magisk / KernelSU 模块 Zip (附带 c++_shared.so)
+    - name: 7. 打包 (自动附带 c++ 运行库)
       run: |
         mkdir -p module/zygisk/arm64-v8a
         cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
@@ -286,19 +301,10 @@ jobs:
         CXX_SHARED=$(find $ANDROID_NDK_HOME -name "libc++_shared.so" | grep arm64-v8a | head -n 1)
         cp "$CXX_SHARED" module/zygisk/arm64-v8a/
         
-        cat << 'EOF' > module/module.prop
-        id=fp_sensor
-        name=OPLUS Sensor Helper
-        version=v1.0
-        versionCode=1
-        author=Anonymous
-        description=Hardware abstraction layer for oplus.
-        EOF
-        
-        cd module
-        zip -r ../FP_Zygisk_Module.zip *
+        printf "id=fp_sensor\nname=OPLUS Sensor Helper\nversion=v1.0\nversionCode=1\nauthor=Anonymous\ndescription=Hardware abstraction layer for oplus.\n" > module/module.prop
+        cd module && zip -r ../FP_Zygisk_Module.zip *
 
-    - name: 9. 上传模块压缩包 (Artifact)
+    - name: 8. 上传
       uses: actions/upload-artifact@v4
       with:
         name: FP_Zygisk_Module

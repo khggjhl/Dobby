@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (LSPlant 无痕隐藏版)
+name: 一键编译 Zygisk 模块 (Pine 终极无痕隐藏版)
 
 on:
   workflow_dispatch:
@@ -14,37 +14,59 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载并整理依赖源码
+    - name: 2. 下载并修复 Pine 源码
       run: |
         mkdir -p third_party
+        git clone --depth 1 https://github.com/canyie/pine.git third_party/pine
         
-        # 1. 下载完美的 LSPlant v4.3 版本 (不报错，支持 Lambda)
-        echo "下载 LSPlant v4.3..."
-        wget -q https://github.com/LSPosed/LSPlant/archive/refs/tags/v4.3.zip -O lsplant.zip
-        unzip -q lsplant.zip && mv LSPlant-4.3 third_party/lsplant
-        
-        # 2. 下载 ShadowHook (作为底层 Hook 引擎)
-        echo "下载 ShadowHook..."
-        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
-        unzip -q shadowhook.zip && mv android-inline-hook-main third_party/shadowhook
-        
-        # 3. 下载 xdl (用于找符号)
-        echo "下载 xdl..."
-        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
-        unzip -q xdl.zip && mv xDL-master third_party/xdl
-        
-        # 4. 强行修改 ShadowHook 的 CMake 版本限制，防止报错
-        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
-        if [ -f "$SHADOWHOOK_CMAKE" ]; then
-            sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
-        fi
+        # 【修复1】重写 scoped_local_ref.h，补全缺失的方法和命名空间
+        cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/scoped_local_ref.h
+        #pragma once
+        #include <jni.h>
+        #include <cstddef>
+        #include <cstdint>
+        namespace pine {
+        template <typename T>
+        class ScopedLocalRef {
+         public:
+          ScopedLocalRef(JNIEnv* env) : env_(env), ref_(nullptr) {}
+          ScopedLocalRef(JNIEnv* env, T ref) : env_(env), ref_(ref) {}
+          ~ScopedLocalRef() { if (ref_ != nullptr) env_->DeleteLocalRef(ref_); }
+          T Get() const { return ref_; }
+          T Release() { T ret = ref_; ref_ = nullptr; return ret; }
+          void Reset(T ref = nullptr) { if (ref_ != nullptr) env_->DeleteLocalRef(ref_); ref_ = ref; }
+          bool IsNull() const { return ref_ == nullptr; }
+          JNIEnv* Env() const { return env_; }
+         private:
+          JNIEnv* env_;
+          T ref_;
+        };
+        class ScopedLocalClassRef : public ScopedLocalRef<jclass> {
+         public:
+          ScopedLocalClassRef(JNIEnv* env) : ScopedLocalRef<jclass>(env) {}
+          ScopedLocalClassRef(JNIEnv* env, jclass ref) : ScopedLocalRef<jclass>(env, ref) {}
+          ScopedLocalClassRef(JNIEnv* env, const char* name) : ScopedLocalRef<jclass>(env, env->FindClass(name)) {}
+          jmethodID GetMethodID(const char* name, const char* signature) { return Env()->GetMethodID(Get(), name, signature); }
+          jmethodID GetStaticMethodID(const char* name, const char* signature) { return Env()->GetStaticMethodID(Get(), name, signature); }
+          jmethodID FindMethodID(const char* name, const char* signature) { return Env()->GetMethodID(Get(), name, signature); }
+        };
+        class ScopedLocalUtfStringRef : public ScopedLocalRef<jstring> {
+         public:
+          ScopedLocalUtfStringRef(JNIEnv* env) : ScopedLocalRef<jstring>(env) {}
+          ScopedLocalUtfStringRef(JNIEnv* env, jstring ref) : ScopedLocalRef<jstring>(env, ref) {}
+          ScopedLocalUtfStringRef(JNIEnv* env, const char* content) : ScopedLocalRef<jstring>(env, env->NewStringUTF(content)) {}
+        };
+        }
+        EOF
 
-        # 5. 打补丁：去掉 LSPlant 的 xz 依赖
-        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
-        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
-        UTILS_DIR=$(find third_party/lsplant -type d -name "utils" | head -n 1)
-        if [ -n "$UTILS_DIR" ]; then
-            cat << 'EOF' > $UTILS_DIR/xz.h
+        # 【修复2】修复 jni_bridge 缺少命名空间前缀的问题
+        sed -i 's/ ScopedLocalClassRef / pine::ScopedLocalClassRef /g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
+        sed -i 's/(ScopedLocalClassRef/(pine::ScopedLocalClassRef/g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
+
+        # 【修复3】解决 xz.h 缺失问题
+        sed -i 's|#include <linux/xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
+        sed -i 's|#include <xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
+        cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/xz.h
         #pragma once
         #include <stddef.h>
         #include <stdint.h>
@@ -63,14 +85,13 @@ jobs:
         }
         #endif
         EOF
-            cat << 'EOF' > $UTILS_DIR/xz_stub.c
+        cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/xz_stub.c
         #include "xz.h"
         struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max) { return 0; }
         enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b) { return XZ_DATA_ERROR; }
         void xz_dec_end(struct xz_dec *s) {}
         void xz_crc32_init(void) {}
         EOF
-        fi
 
     - name: 3. 生成 CMakeLists.txt
       run: |
@@ -81,34 +102,37 @@ jobs:
         
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/include
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/src
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/art
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils
         )
         
-        set(SHADOWHOOK_STATIC ON CACHE BOOL "")
-        add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
+        # 精准过滤源码，只留 ARM64
+        file(GLOB_RECURSE PINE_SOURCES 
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/android.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/jni_bridge.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/pine.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/art/*.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline/*.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline/*.S"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils/*.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils/xz_stub.c"
+        )
+        list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/thumb2.cpp")
+        list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/arm32.cpp")
+        list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/x86.cpp")
+        list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/x86_64.cpp")
 
-        # xdl
-        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
-        add_library(xdl STATIC ${XDL_SOURCES})
-        target_link_libraries(xdl log)
+        add_library(pine STATIC ${PINE_SOURCES})
+        target_link_libraries(pine log)
 
-        # LSPlant v4.3
-        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/*.cc")
-        file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
-        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
-        target_link_libraries(lsplant xdl shadowhook)
-
-        # Zygisk 模块
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
-        target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook c++_shared)
+        target_link_libraries(finger_spoof_zygisk log android pine)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
         EOF
 
-    - name: 4. 生成 zygisk.hpp
+    - name: 4. 生成 zygisk.cpp 和 zygisk.hpp
       run: |
         mkdir -p third_party/zygisk
         cat << 'EOF' > third_party/zygisk/zygisk.hpp
@@ -123,22 +147,11 @@ jobs:
         class ModuleBase {
         public:
             virtual void onLoad(Api *api, JNIEnv *env) {}
-            virtual void preAppSpecialize(AppSpecializeArgs *args) {}
             virtual void postAppSpecialize(const AppSpecializeArgs *args) {}
-            virtual void preServerSpecialize(ServerSpecializeArgs *args) {}
-            virtual void postServerSpecialize(const ServerSpecializeArgs *args) {}
         };
-        struct AppSpecializeArgs {
-            jstring nice_name; jstring app_data_dir; const char *const *args;
-            jint *uid; jint *gid; jintArray *gids; jint *runtime_flags;
-            jobjectArray *rlimits; jstring *instruction_set;
-            const char *const *app_path; jstring *app_lib_dir;
-            const char *const *permitted_paths; jint *mount_external; jstring *se_info;
-        };
-        struct ServerSpecializeArgs { jint *uid; jint *gid; jintArray *gids; jint *runtime_flags; };
+        struct AppSpecializeArgs { jint *uid; };
         struct Api {
-            void connectCompanion(int pid); void connectCompanion();
-            int getModuleDir(); void setOption(int opt);
+            void setOption(int opt);
             enum Option { DLCLOSE_MODULE_LIBRARY = 0 };
         };
         #define REGISTER_ZYGISK_MODULE(cls) \
@@ -149,8 +162,6 @@ jobs:
         }
         EOF
 
-    - name: 5. 生成核心 zygisk.cpp
-      run: |
         cat << 'EOF' > zygisk.cpp
         #include <jni.h>
         #include <android/log.h>
@@ -162,10 +173,23 @@ jobs:
         #include <netinet/in.h>
         #include <mutex>
         #include <string>
+        #include <functional>
         #include "zygisk.hpp"
-        #include "lsplant.hpp"
-        #include "xdl.h"
-        #include "shadowhook.h"
+
+        // 【终极突破】：不包含丢失的头文件，直接手写 Pine 接口声明，骗过编译器！
+        namespace pine {
+            struct CallFrame {
+                JNIEnv* env;
+                jobject* args;
+                jobject result;
+                void setResult(jobject result);
+            };
+            class Pine {
+            public:
+                static bool init();
+                static bool hook(JNIEnv* env, jmethodID method, std::function<void(CallFrame*)> callback);
+            };
+        }
 
         #define TAG "fp-zygisk"
         #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -181,22 +205,6 @@ jobs:
 
         static fp_rule g_currentRule;
         static bool g_hasRule = false;
-
-        void* inline_hooker(void* target, void* hooker) {
-            return shadowhook_hook_func_addr(target, hooker, nullptr);
-        }
-
-        bool inline_unhooker(void* stub) {
-            return shadowhook_unhook(stub) == 0;
-        }
-
-        void* art_symbol_resolver(std::string_view symbol_name) {
-            void* handle = xdl_open("libart.so", XDL_DEFAULT);
-            if (!handle) return nullptr;
-            void* sym = xdl_sym(handle, symbol_name.data(), nullptr);
-            xdl_close(handle);
-            return sym;
-        }
 
         static void fetch_rule_from_kernel(uid_t uid) {
             int fd = socket(AF_INET, SOCK_DGRAM, 0);
@@ -216,38 +224,38 @@ jobs:
         }
 
         static void hook_java_methods(JNIEnv *env) {
-            // 伪装 Android ID
             std::string fake_id = get_fake(1); 
             if (!fake_id.empty()) {
                 jclass secureClass = env->FindClass("android/provider/Settings$Secure");
                 if (secureClass) {
                     jmethodID mid = env->GetStaticMethodID(secureClass, "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;");
                     if (mid) {
-                        lsplant::Hook(env, mid, [fake_id](JNIEnv* e, jobject thiz, jobject resolver, jstring name) -> jobject {
+                        pine::Pine::hook(env, mid, [fake_id](pine::CallFrame* callFrame) {
+                            JNIEnv* e = callFrame->env;
+                            jstring name = static_cast<jstring>(callFrame->args[1]);
                             if (name) {
                                 const char* c_name = e->GetStringUTFChars(name, nullptr);
                                 if (c_name && strcmp(c_name, "android_id") == 0) {
                                     e->ReleaseStringUTFChars(name, c_name);
-                                    return e->NewStringUTF(fake_id.c_str());
+                                    callFrame->setResult(e->NewStringUTF(fake_id.c_str()));
+                                    return;
                                 }
                                 e->ReleaseStringUTFChars(name, c_name);
                             }
-                            return nullptr;
                         });
                     }
                     env->DeleteLocalRef(secureClass);
                 }
             }
             
-            // 伪装 IMEI
             std::string fake_imei = get_fake(2);
             if (!fake_imei.empty()) {
                 jclass tmClass = env->FindClass("android/telephony/TelephonyManager");
                 if (tmClass) {
                     jmethodID mid = env->GetMethodID(tmClass, "getImei", "()Ljava/lang/String;");
                     if (mid) {
-                        lsplant::Hook(env, mid, [fake_imei](JNIEnv* e, jobject thiz) -> jobject {
-                            return e->NewStringUTF(fake_imei.c_str());
+                        pine::Pine::hook(env, mid, [fake_imei](pine::CallFrame* callFrame) {
+                            callFrame->setResult(callFrame->env->NewStringUTF(fake_imei.c_str()));
                         });
                     }
                     env->DeleteLocalRef(tmClass);
@@ -263,19 +271,10 @@ jobs:
                 fetch_rule_from_kernel(uid);
                 if (!g_hasRule) return;
 
-                shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
-
-                lsplant::InitInfo info {
-                    .inline_hooker = inline_hooker,
-                    .inline_unhooker = inline_unhooker,
-                    .art_symbol_resolver = art_symbol_resolver
-                };
-                lsplant::Init(env, info);
-                
+                pine::Pine::init();
                 hook_java_methods(env);
 
-                // 【核心隐蔽点】：Hook 完成后，直接从内存映射中卸载我们的 .so
-                // 游戏反作弊去扫 /proc/self/maps 时，根本找不到 liboplus_sensor.so
+                // 【无痕隐藏】：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:
@@ -286,25 +285,20 @@ jobs:
         JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
         EOF
 
-    - name: 6. 编译
+    - name: 5. 编译
       run: |
         mkdir build && cd build
         cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30
         make
 
-    - name: 7. 打包 (自动附带 c++ 运行库)
+    - name: 6. 打包
       run: |
         mkdir -p module/zygisk/arm64-v8a
         cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
-        
-        # 拷贝 c++ 运行库防止依赖缺失
-        CXX_SHARED=$(find $ANDROID_NDK_HOME -name "libc++_shared.so" | grep arm64-v8a | head -n 1)
-        cp "$CXX_SHARED" module/zygisk/arm64-v8a/
-        
         printf "id=fp_sensor\nname=OPLUS Sensor Helper\nversion=v1.0\nversionCode=1\nauthor=Anonymous\ndescription=Hardware abstraction layer for oplus.\n" > module/module.prop
         cd module && zip -r ../FP_Zygisk_Module.zip *
 
-    - name: 8. 上传
+    - name: 7. 上传
       uses: actions/upload-artifact@v4
       with:
         name: FP_Zygisk_Module

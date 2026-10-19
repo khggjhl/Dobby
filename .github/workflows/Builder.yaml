@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (LSPlant Java Hook 绝对成功版)
+name: 一键编译 Zygisk 模块 (LSPlant 终极通关版)
 
 on:
   workflow_dispatch:
@@ -15,28 +15,30 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载依赖 (强制使用 wget 稳定下载)
+    - name: 2. 下载依赖 (带重试机制，防断连)
       run: |
         mkdir -p third_party
-        cd third_party
         
-        echo "下载 LSPlant..."
-        wget -q https://github.com/LSPosed/LSPlant/archive/refs/heads/master.zip -O lsplant.zip
-        unzip -q lsplant.zip && mv LSPlant-master lsplant
+        # 1. 下载 LSPlant
+        for i in {1..5}; do
+          git clone --depth 1 https://github.com/LSPosed/LSPlant.git third_party/lsplant && break
+          echo "LSPlant 下载失败，重试中..."
+          sleep 3
+        done
         
-        echo "下载 Dobby..."
-        wget -q https://github.com/jmpews/Dobby/archive/refs/heads/master.zip -O dobby.zip
-        unzip -q dobby.zip && mv Dobby-master dobby
+        # 2. 下载 Dobby
+        for i in {1..5}; do
+          git clone --depth 1 https://github.com/jmpews/Dobby.git third_party/dobby && break
+          echo "Dobby 下载失败，重试中..."
+          sleep 3
+        done
         
-        echo "下载 xdl..."
-        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
-        unzip -q xdl.zip && mv xDL-master xdl
-        
-        cd ..
-        echo "===== 检查源码是否就位 ====="
-        echo "LSPlant 源码:" && ls third_party/lsplant/lsplant/src/main/cpp/ | head -n 5
-        echo "xdl 源码:" && ls third_party/xdl/src/main/cpp/ | head -n 5
-        echo "============================"
+        # 3. 下载 xdl
+        for i in {1..5}; do
+          git clone --depth 1 https://github.com/hexhacking/xDL.git third_party/xdl && break
+          echo "xdl 下载失败，重试中..."
+          sleep 3
+        done
 
     - name: 3. 生成 zygisk.hpp
       run: |
@@ -97,7 +99,7 @@ jobs:
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
             ${CMAKE_SOURCE_DIR}/third_party/dobby/include
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/include
+            ${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp
         )
         
         # ===== 1. 编译 Dobby =====
@@ -113,15 +115,29 @@ jobs:
         add_library(dobby STATIC ${DOBBY_SOURCES})
         target_link_libraries(dobby log)
 
-        # ===== 2. 编译 xdl =====
-        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp/*.cc")
+        # ===== 2. 编译 xdl (修复：加上 *.c 和 *.cc) =====
+        file(GLOB_RECURSE XDL_SOURCES 
+            "${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp/*.cc"
+            "${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp/*.c"
+        )
+        if(NOT XDL_SOURCES)
+            message(FATAL_ERROR "❌ 致命错误: 找不到 xdl 源码！")
+        endif()
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # ===== 3. 编译 LSPlant =====
-        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.cc")
-        file(GLOB_RECURSE LSPLANT_XZ_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/linux/lib/*.c")
-        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_XZ_SOURCES})
+        # ===== 3. 编译 LSPlant (修复：加上 *.c 和 *.cpp) =====
+        file(GLOB_RECURSE LSPLANT_SOURCES 
+            "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.cc"
+            "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.c"
+        )
+        if(NOT LSPLANT_SOURCES)
+            message(FATAL_ERROR "❌ 致命错误: 找不到 LSPlant 源码！")
+        endif()
+        add_library(lsplant STATIC ${LSPLANT_SOURCES})
+        
+        # 添加 xz 头文件搜索路径
         target_include_directories(lsplant PRIVATE 
             "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/linux/include"
             "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/userspace"

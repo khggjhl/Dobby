@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (终极暴击版)
+name: 一键编译 Zygisk 模块 (ShadowHook 终极版)
 
 on:
   workflow_dispatch:
@@ -20,12 +20,20 @@ jobs:
             mv lsplant dobby xdl zygisk third_party/ 2>/dev/null || true
         fi
 
-    - name: 3. 准备 NDK
+    - name: 3. 下载 ShadowHook 源码
+      run: |
+        mkdir -p third_party
+        # 下载 ShadowHook (字节跳动 android-inline-hook) 最新稳定版
+        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/master.zip -O shadowhook.zip
+        unzip -q shadowhook.zip
+        mv android-inline-hook-master third_party/shadowhook
+
+    - name: 4. 准备 NDK
       uses: nttld/setup-ndk@v1
       with:
         ndk-version: r25c
 
-    - name: 4. 修补 LSPlant 的 xz 依赖
+    - name: 5. 修补 LSPlant 的 xz 依赖
       run: |
         find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
         find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
@@ -60,7 +68,7 @@ jobs:
         EOF
         fi
 
-    - name: 5. 生成 CMakeLists.txt (终极过滤 + 补全路径)
+    - name: 6. 生成 CMakeLists.txt (集成 ShadowHook 静态库)
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
@@ -69,46 +77,24 @@ jobs:
         
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            # Dobby 所有内部深层路径全加进来
-            ${CMAKE_SOURCE_DIR}/third_party/dobby
-            ${CMAKE_SOURCE_DIR}/third_party/dobby/include
-            ${CMAKE_SOURCE_DIR}/third_party/dobby/source
-            ${CMAKE_SOURCE_DIR}/third_party/dobby/source/core
-            # xdl
-            ${CMAKE_SOURCE_DIR}/third_party/xdl
             ${CMAKE_SOURCE_DIR}/third_party/xdl/include
             ${CMAKE_SOURCE_DIR}/third_party/xdl/src
-            # LSPlant
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
         )
         
-        # 1. 编译 Dobby
-        file(GLOB_RECURSE DOBBY_SOURCES 
-            "${CMAKE_SOURCE_DIR}/third_party/dobby/source/*.c"
-            "${CMAKE_SOURCE_DIR}/third_party/dobby/source/*.cc"
-        )
-        # 把所有无用的平台、架构、和那个气人的缓存工具全干掉！
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/KernelMode/.*")
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/Windows/.*")
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/Darwin/.*")
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/x86/.*")
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/x86_64/.*")
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/arm/.*")
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/clear-cache-tool/.*") # 整个目录排除
-        
-        add_library(dobby STATIC ${DOBBY_SOURCES})
-        target_link_libraries(dobby log)
+        # 配置 ShadowHook 为静态库
+        set(SHADOWHOOK_STATIC ON CACHE BOOL "")
+        add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
 
-        # 2. xdl
+        # 1. xdl
         file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 3. LSPlant
+        # 2. LSPlant (依赖 xdl)
         file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
         set(LSPLANT_STUB_C "")
         if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/utils/xz_stub.c")
@@ -116,17 +102,16 @@ jobs:
         elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
             set(LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
         endif()
-        
         add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
-        target_link_libraries(lsplant dobby xdl)
+        target_link_libraries(lsplant xdl)
 
-        # 4. Zygisk
+        # 3. Zygisk 模块 (链接 ShadowHook)
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
-        target_link_libraries(finger_spoof_zygisk log android lsplant dobby xdl)
+        target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
         EOF
 
-    - name: 6. 生成 zygisk.cpp 和 zygisk.hpp
+    - name: 7. 生成 zygisk.cpp 和 zygisk.hpp (使用 ShadowHook)
       run: |
         cat << 'EOF' > zygisk.hpp
         #pragma once
@@ -184,11 +169,12 @@ jobs:
         #include <netinet/in.h>
         #include <mutex>
         #include <string>
+        #include <sys/mman.h>
 
         #include "zygisk.hpp"
         #include "lsplant.hpp"
-        #include "dobby.h"
         #include "xdl.h"
+        #include "shadowhook.h" // 引入 ShadowHook 头文件
 
         #define TAG "fp-zygisk"
         #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -210,14 +196,18 @@ jobs:
         static fp_rule g_currentRule;
         static bool g_hasRule = false;
 
+        // ==========================================
+        // 核心替换：使用 ShadowHook 进行内联 Hook
+        // ==========================================
         void* inline_hooker(void* target, void* hooker) {
-            void* backup = nullptr;
-            if (DobbyHook(target, hooker, &backup) == 0) return backup;
-            return nullptr;
+            // shadowhook_hook_func_addr: 通过绝对地址 Hook 一个函数
+            // 返回值: stub 句柄，用于后续 unhook
+            return shadowhook_hook_func_addr(target, hooker, nullptr);
         }
 
-        bool inline_unhooker(void* func) {
-            return DobbyDestroy(func) == 0;
+        bool inline_unhooker(void* stub) {
+            // 释放 ShadowHook 的 hook
+            return shadowhook_unhook(stub) == 0;
         }
 
         void* art_symbol_resolver(std::string_view symbol_name) {
@@ -293,6 +283,10 @@ jobs:
                 fetch_rule_from_kernel(uid);
                 if (!g_hasRule) return;
 
+                // 初始化 ShadowHook
+                shadowhook_init(shadowhook_mode_t::SHADOWHOOK_MODE_SHARED, false);
+
+                // 使用 ShadowHook 初始化 LSPlant
                 lsplant::InitInfo info {
                     .inline_hooker = inline_hooker,
                     .inline_unhooker = inline_unhooker,
@@ -312,7 +306,7 @@ jobs:
         JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
         EOF
 
-    - name: 7. 编译 Zygisk 模块
+    - name: 8. 编译 Zygisk 模块
       run: |
         mkdir build && cd build
         cmake .. \
@@ -322,7 +316,7 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
         make
 
-    - name: 8. 打包成 Magisk / KernelSU 模块 Zip
+    - name: 9. 打包成 Magisk / KernelSU 模块 Zip
       run: |
         mkdir -p module/zygisk/arm64-v8a
         cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
@@ -339,7 +333,7 @@ jobs:
         cd module
         zip -r ../FP_Zygisk_Module.zip *
 
-    - name: 9. 上传模块压缩包 (Artifact)
+    - name: 10. 上传模块压缩包 (Artifact)
       uses: actions/upload-artifact@v4
       with:
         name: FP_Zygisk_Module

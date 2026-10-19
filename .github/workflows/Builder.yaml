@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (纯 C++ 源码编译终极版)
+name: 一键编译 Zygisk 模块 (ShadowHook 源码暴力修复版)
 
 on:
   workflow_dispatch:
@@ -14,50 +14,54 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载 ShadowHook 源码并打补丁
+    - name: 2. 下载 ShadowHook 源码
       run: |
         mkdir -p third_party
-        # 下载 ShadowHook 源码
         git clone --depth 1 https://github.com/bytedance/android-inline-hook.git third_party/shadowhook
 
-        # 魔改 ShadowHook 的 CMake 版本限制，降级到 3.10 防止报错
+        # 魔改 ShadowHook 的 CMake 版本限制
         SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
         if [ -f "$SHADOWHOOK_CMAKE" ]; then
             sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
-            echo "✅ 已修复 ShadowHook 的 CMake 版本限制"
         fi
 
-    - name: 3. 生成 CMakeLists.txt (手动接管源码编译)
+    - name: 3. 生成 CMakeLists.txt (暴力过滤)
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
+        # 把 ShadowHook 所有可能的头文件目录全塞进去
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp
             ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/arch
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/arch/include
         )
 
-        # ===== 手动收集 ShadowHook 源码 =====
+        # 收集所有 .c 文件
         file(GLOB_RECURSE SHADOWHOOK_SOURCES 
             "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/*.c"
-            "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/*.cc"
         )
-        # 剔除导致报错的 clear-cache-tool 目录及测试代码
+        
+        # 暴力剔除所有非 arm64 的架构代码和无关工具
+        list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/arch/arm/.*")
+        list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/arch/x86/.*")
+        list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/arch/x86_64/.*")
         list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/clear-cache-tool.*")
-        list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/test.*")
+        
+        # 打印一下留下来的文件，方便确认
+        message(STATUS "ShadowHook 编译文件: ${SHADOWHOOK_SOURCES}")
 
-        # 把 ShadowHook 编译成静态库
         add_library(shadowhook STATIC ${SHADOWHOOK_SOURCES})
         target_link_libraries(shadowhook log)
 
-        # ===== 编译 Zygisk 模块 =====
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android shadowhook c++_shared)
         
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
-        # 允许 Zygisk 运行时的未定义符号
         target_link_options(finger_spoof_zygisk PRIVATE -Wl,--allow-shlib-undefined)
         EOF
 
@@ -137,11 +141,9 @@ jobs:
             return std::string(fv.fake, fv.len);
         }
 
-        // 原始函数指针
         static jstring (*orig_getString)(JNIEnv*, jclass, jobject, jstring) = nullptr;
         static jstring (*orig_getImei)(JNIEnv*, jobject) = nullptr;
 
-        // 伪装 Android ID
         static jstring fake_getString(JNIEnv* env, jclass clazz, jobject resolver, jstring name) {
             if (name) {
                 const char* c_name = env->GetStringUTFChars(name, nullptr);
@@ -155,13 +157,11 @@ jobs:
             return orig_getString ? orig_getString(env, clazz, resolver, name) : nullptr;
         }
 
-        // 伪装 IMEI
         static jstring fake_getImei(JNIEnv* env, jobject thiz) {
             std::string fake_imei = get_fake(2);
             return env->NewStringUTF(fake_imei.c_str());
         }
 
-        // 获取 ArtMethod 的 entry_point 偏移量 (Android 15 ARM64 下通常是 32)
         void* get_entry_point(void* art_method) {
             return *(void**)((uintptr_t)art_method + 32);
         }
@@ -201,7 +201,6 @@ jobs:
                 shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
                 hook_java_methods(env);
 
-                // 无痕隐藏：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:
@@ -218,7 +217,7 @@ jobs:
         cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30
         make
 
-    - name: 7. 打包 (附带 c++ 运行库)
+    - name: 7. 打包
       run: |
         mkdir -p module/zygisk/arm64-v8a
         cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so

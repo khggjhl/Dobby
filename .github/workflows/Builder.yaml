@@ -189,10 +189,10 @@ jobs:
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android pine)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
-EOF
+        EOF
 
-    - 姓名: 5. 生成核心 zygisk.cpp
-跑: |
+    - name: 5. 生成核心 zygisk.cpp
+      run: |
         cat << 'EOF' > zygisk.cpp
         #include <jni.h>
         #include <android/log.h>
@@ -222,29 +222,29 @@ EOF
         #define FP_MAGIC          0x70
         #define FP_CMD_GET_RULE   0xC0707006L 
 
-结构fp_field_value{char fake[FP_VALUE_MAX]；unsigned int len；}；
-结构fp_rule{unsigned int uid；char包[FP_NAME_MAX]；结构fp_field_value字段[FP_FIELD_COUNT]；}；
+        struct fp_field_value { char fake[FP_VALUE_MAX]; unsigned int len; };
+        struct fp_rule { unsigned int uid; char package[FP_NAME_MAX]; struct fp_field_value fields[FP_FIELD_COUNT]; };
 
-静态std：：互斥体g_lock；
-静态fp_rule g_currentRule；
-静态bool g_hasRule=false；
+        static std::mutex g_lock;
+        static fp_rule g_currentRule;
+        static bool g_hasRule = false;
 
-静态空值fetch_rule_from_kernel(uid_tuid){
-int fd=套接字(AF_INET，SOCK_Dgram，0)；
-if(fd<0)返回；
-结构fp_rule req；memset(&req，0，sizeof(req))；req.uid=uid；
-if(ioctl(fd，FP_CMD_GET_RULE，&req)==0){
-STD：：lock_guard<std：：mutex>lk(g_lock)；
-G_currentRule=req；g_hasRule=true；
+        static void fetch_rule_from_kernel(uid_t uid) {
+            int fd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd < 0) return;
+            struct fp_rule req; memset(&req, 0, sizeof(req)); req.uid = uid;
+            if (ioctl(fd, FP_CMD_GET_RULE, &req) == 0) {
+                std::lock_guard<std::mutex> lk(g_lock);
+                g_currentRule = req; g_hasRule = true;
             }
-关闭(fd)；
+            close(fd);
         }
 
-静态std：：string get_fake(int字段){
-STD：：lock_guard<std：：mutex>lk(g_lock)；
-if(！G_hasRule||field<0||field>=FP_FIELD_COUNT)返回""；
-常数auto&fv=g_currentRule.fields[field]；
-if(fv.len==0)返回""；
+        static std::string get_fake(int field) {
+            std::lock_guard<std::mutex> lk(g_lock);
+            if (!g_hasRule || field < 0 || field >= FP_FIELD_COUNT) return "";
+            const auto &fv = g_currentRule.fields[field];
+            if (fv.len == 0) return "";
             return std::string(fv.fake, fv.len);
         }
 
@@ -312,65 +312,65 @@ if(fv.len==0)返回""；
                         pine::Pine::hook(env, mid, [mac](pine::CallFrame* callFrame) {
                             JNIEnv* e = callFrame->env;
                             jbyteArray arr = e->NewByteArray(6);
-e->SetByteArrayRegion(arr，0，6，reinterpret_cast<const jbyte*>(mac))；
-callFrame->setResult(arr)；
+                            e->SetByteArrayRegion(arr, 0, 6, reinterpret_cast<const jbyte*>(mac));
+                            callFrame->setResult(arr);
                         });
                     }
-env->DeleteLocalRef(niClass)；
+                    env->DeleteLocalRef(niClass);
                 }
             }
         }
 
-类FingerprintSpoofModule:public zygisk：：ModuleBase{
-公共：
-void onLoad(Api*api，JNIEnv*env)覆盖{this->api=api；this->env=env；}
-void postAppSpecialize(常量AppSpecializeArgs*args)覆盖{
-UID_tuid=getuid()；
-fetch_rule_from_kernel(uid)；
-if(！G_hasRule)返回；
+        class FingerprintSpoofModule : public zygisk::ModuleBase {
+        public:
+            void onLoad(Api *api, JNIEnv *env) override { this->api = api; this->env = env; }
+            void postAppSpecialize(const AppSpecializeArgs *args) override {
+                uid_t uid = getuid();
+                fetch_rule_from_kernel(uid);
+                if (!g_hasRule) return;
 
-pine：：Pine：：init()；
-hook_java_methods(env)；
+                pine::Pine::init();
+                hook_java_methods(env);
 
-if(api)api->setOption(zygisk：：Api：：Option：：dlclose_MODULE_LIBRARY)；
+                if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
-私人的：
-API*api=nullptr；JNIEnv*env=nullptr；
+        private:
+            Api *api = nullptr; JNIEnv *env = nullptr;
         };
 
-register_ZYGISK_MODULE(指纹SPOOFModule)
-JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*vm，void*){return JNI_VERSION_1_6；}
-EOF
+        REGISTER_ZYGISK_MODULE(FingerprintSpoofModule)
+        JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
+        EOF
 
--姓名：6.编译Zygisk模块
-跑：|
-mkdir生成&&cd生成
-CMake..\
--DCMAKE_toolchain_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake\
--DANDROID_ABI=arm64-v8a\
+    - name: 6. 编译 Zygisk 模块
+      run: |
+        mkdir build && cd build
+        cmake .. \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
           -DANDROID_PLATFORM=android-30 \
--DCMAKE_BUILD_TYPE=发布
-make-j2
+          -DCMAKE_BUILD_TYPE=Release
+        make -j2
 
--姓名：7.打包成Magisk/KernelSu模块Zip
-跑: |
-mkdir-p模块/zygisk/arm64-v8a
-CP构建/libfinger_spoof_zygisk.so模块/zygisk/arm64-v8a/liboplus_sensor.so
+    - name: 7. 打包成 Magisk / KernelSU 模块 Zip
+      run: |
+        mkdir -p module/zygisk/arm64-v8a
+        cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
         
-cat<<'EOF'>模块/module.prop
-ID=fp_sensor
-name=oplus传感器助手
+        cat << 'EOF' > module/module.prop
+        id=fp_sensor
+        name=OPLUS Sensor Helper
         version=v1.0
-版本代码=1
-作者=匿名
-说明=ompus的硬件抽象层。
-EOF
+        versionCode=1
+        author=Anonymous
+        description=Hardware abstraction layer for oplus.
+        EOF
         
-CD模块
-zip-r../FP_Zygisk_module.zip*
+        cd module
+        zip -r ../FP_Zygisk_Module.zip *
 
--姓名：8.上传模块压缩包(工件)
-uses：操作/上载工件@v4
-和……一起:
-姓名: FP_Zygisk_Module
-路径: FP_Zygisk_Module.zip
+    - name: 8. 上传模块压缩包 (Artifact)
+      uses: actions/upload-artifact@v4
+      with:
+        name: FP_Zygisk_Module
+        path: FP_Zygisk_Module.zip

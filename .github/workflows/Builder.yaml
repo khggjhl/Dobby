@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (纯 C++ 直捣黄龙版)
+name: 一键编译 Zygisk 模块 (纯 C++ 源码编译终极版)
 
 on:
   workflow_dispatch:
@@ -14,14 +14,20 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载 ShadowHook 预编译包 (免去源码编译烦恼)
+    - name: 2. 下载 ShadowHook 源码并打补丁
       run: |
-        mkdir -p third_party/shadowhook
-        # 下载字节官方发布在 Maven 的预编译 AAR
-        wget -q https://repo1.maven.org/maven2/com/bytedance/android/shadowhook/2.0.1/shadowhook-2.0.1.aar -O shadowhook.aar
-        unzip -q shadowhook.aar -d third_party/shadowhook
+        mkdir -p third_party
+        # 下载 ShadowHook 源码
+        git clone --depth 1 https://github.com/bytedance/android-inline-hook.git third_party/shadowhook
 
-    - name: 3. 生成 CMakeLists.txt
+        # 魔改 ShadowHook 的 CMake 版本限制，降级到 3.10 防止报错
+        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
+        if [ -f "$SHADOWHOOK_CMAKE" ]; then
+            sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
+            echo "✅ 已修复 ShadowHook 的 CMake 版本限制"
+        fi
+
+    - name: 3. 生成 CMakeLists.txt (手动接管源码编译)
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
@@ -30,18 +36,28 @@ jobs:
         
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/prefab/modules/shadowhook/include
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
         )
 
-        # 链接 ShadowHook 预编译静态库
-        add_library(shadowhook STATIC IMPORTED)
-        set_target_properties(shadowhook PROPERTIES IMPORTED_LOCATION
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/prefab/modules/shadowhook/libs/android.arm64-v8a/libshadowhook.a
+        # ===== 手动收集 ShadowHook 源码 =====
+        file(GLOB_RECURSE SHADOWHOOK_SOURCES 
+            "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/*.c"
+            "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/*.cc"
         )
+        # 剔除导致报错的 clear-cache-tool 目录及测试代码
+        list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/clear-cache-tool.*")
+        list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/test.*")
 
+        # 把 ShadowHook 编译成静态库
+        add_library(shadowhook STATIC ${SHADOWHOOK_SOURCES})
+        target_link_libraries(shadowhook log)
+
+        # ===== 编译 Zygisk 模块 =====
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android shadowhook c++_shared)
+        
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
+        # 允许 Zygisk 运行时的未定义符号
         target_link_options(finger_spoof_zygisk PRIVATE -Wl,--allow-shlib-undefined)
         EOF
 
@@ -121,15 +137,11 @@ jobs:
             return std::string(fv.fake, fv.len);
         }
 
-        // ========================================================
-        // 【核心替换】：纯 C++ 桥接函数，直接接管 Java 方法执行！
-        // ========================================================
-        
-        // 1. 定义原始函数指针
+        // 原始函数指针
         static jstring (*orig_getString)(JNIEnv*, jclass, jobject, jstring) = nullptr;
         static jstring (*orig_getImei)(JNIEnv*, jobject) = nullptr;
 
-        // 2. 伪装 `Settings.Secure.getString`
+        // 伪装 Android ID
         static jstring fake_getString(JNIEnv* env, jclass clazz, jobject resolver, jstring name) {
             if (name) {
                 const char* c_name = env->GetStringUTFChars(name, nullptr);
@@ -140,11 +152,10 @@ jobs:
                 }
                 env->ReleaseStringUTFChars(name, c_name);
             }
-            // 不是 android_id，调用原方法
             return orig_getString ? orig_getString(env, clazz, resolver, name) : nullptr;
         }
 
-        // 3. 伪装 `TelephonyManager.getImei`
+        // 伪装 IMEI
         static jstring fake_getImei(JNIEnv* env, jobject thiz) {
             std::string fake_imei = get_fake(2);
             return env->NewStringUTF(fake_imei.c_str());
@@ -156,7 +167,6 @@ jobs:
         }
 
         static void hook_java_methods(JNIEnv *env) {
-            // Hook Android ID
             jclass secureClass = env->FindClass("android/provider/Settings$Secure");
             if (secureClass) {
                 jmethodID mid = env->GetStaticMethodID(secureClass, "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;");
@@ -168,7 +178,6 @@ jobs:
                 env->DeleteLocalRef(secureClass);
             }
 
-            // Hook IMEI
             jclass tmClass = env->FindClass("android/telephony/TelephonyManager");
             if (tmClass) {
                 jmethodID mid = env->GetMethodID(tmClass, "getImei", "()Ljava/lang/String;");
@@ -190,11 +199,9 @@ jobs:
                 if (!g_hasRule) return;
 
                 shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
-
-                // 执行纯 C++ 桥接 Hook
                 hook_java_methods(env);
 
-                // 极限隐蔽：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
+                // 无痕隐藏：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:

@@ -14,30 +14,26 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载并修复依赖
+    - name: 2. 下载并修复依赖 (使用精准的 git 分支)
       run: |
         mkdir -p third_party
         
-        # 1. 下载完美支持 Lambda 的 LSPlant v4.2
+        # 1. 直接拉取 LSPlant v4.2 分支，避免解压导致的目录嵌套问题
         echo "下载 LSPlant v4.2..."
-        wget -q https://github.com/LSPosed/LSPlant/archive/refs/tags/v4.2.zip -O lsplant.zip
-        unzip -q lsplant.zip && mv LSPlant-4.2 third_party/lsplant
+        git clone --depth 1 -b v4.2 https://github.com/LSPosed/LSPlant.git third_party/lsplant
         
         # 2. 下载 ShadowHook
         echo "下载 ShadowHook..."
-        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
-        unzip -q shadowhook.zip && mv android-inline-hook-main third_party/shadowhook
+        git clone --depth 1 https://github.com/bytedance/android-inline-hook.git third_party/shadowhook
         
-        # 3. 下载 xdl (用于找符号)
+        # 3. 下载 xdl
         echo "下载 xdl..."
-        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
-        unzip -q xdl.zip && mv xDL-master third_party/xdl
+        git clone --depth 1 https://github.com/hexhacking/xDL.git third_party/xdl
 
-        # 4. 魔改 ShadowHook 的 CMake 版本限制 (它官方要求 4.0，导致 GitHub 报错)
+        # 4. 魔改 ShadowHook 的 CMake 版本限制
         SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
         if [ -f "$SHADOWHOOK_CMAKE" ]; then
             sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
-            echo "✅ 已修复 ShadowHook 的 CMake 版本限制"
         fi
 
         # 5. 打补丁：去掉 LSPlant 的 xz 依赖
@@ -73,7 +69,7 @@ jobs:
         EOF
         fi
 
-    - name: 3. 生成 CMakeLists.txt
+    - name: 3. 生成 CMakeLists.txt (全盘搜索源码)
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
@@ -98,9 +94,22 @@ jobs:
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 编译 LSPlant
+        # 编译 LSPlant (暴力全盘搜索 .cc 文件)
         file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/*.cc")
-        file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
+        if(NOT LSPLANT_SOURCES)
+            # 如果没找到，说明路径变了，直接全盘搜
+            file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
+            list(FILTER LSPLANT_SOURCES EXCLUDE REGEX ".*/test.*")
+            list(FILTER LSPLANT_SOURCES EXCLUDE REGEX ".*/tests.*")
+        endif()
+        
+        if(NOT LSPLANT_SOURCES)
+            message(FATAL_ERROR "❌ 致命错误: 翻遍了目录依然找不到 LSPlant 源码！")
+        endif()
+
+        # 查找 xz_stub.c
+        file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/*/xz_stub.c")
+        
         add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
         target_link_libraries(lsplant xdl log shadowhook)
 
@@ -225,11 +234,11 @@ jobs:
                                 const char* c_name = e->GetStringUTFChars(name, nullptr);
                                 if (c_name && strcmp(c_name, "android_id") == 0) {
                                     e->ReleaseStringUTFChars(name, c_name);
-                                    return e->NewStringUTF(fake_id.c_str()); // 返回假 ID
+                                    return e->NewStringUTF(fake_id.c_str());
                                 }
                                 e->ReleaseStringUTFChars(name, c_name);
                             }
-                            return nullptr; // 如果不是 android_id，放行原方法
+                            return nullptr; 
                         });
                     }
                     env->DeleteLocalRef(secureClass);
@@ -244,7 +253,7 @@ jobs:
                     jmethodID mid = env->GetMethodID(tmClass, "getImei", "()Ljava/lang/String;");
                     if (mid) {
                         lsplant::Hook(env, mid, [fake_imei](JNIEnv* e, jobject thiz) -> jobject {
-                            return e->NewStringUTF(fake_imei.c_str()); // 返回假 IMEI
+                            return e->NewStringUTF(fake_imei.c_str());
                         });
                     }
                     env->DeleteLocalRef(tmClass);
@@ -256,14 +265,12 @@ jobs:
         public:
             void onLoad(Api *api, JNIEnv *env) override { this->api = api; this->env = env; }
             void postAppSpecialize(const AppSpecializeArgs *args) override {
-                uid_t pid = getuid();
-                fetch_rule_from_kernel(pid);
+                uid_t uid = getuid();
+                fetch_rule_from_kernel(uid);
                 if (!g_hasRule) return;
 
-                // 初始化 ShadowHook
                 shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
 
-                // 初始化 LSPlant，用 ShadowHook 做底座
                 lsplant::InitInfo info {
                     .inline_hooker = inline_hooker,
                     .inline_unhooker = inline_unhooker,
@@ -271,11 +278,9 @@ jobs:
                 };
                 lsplant::Init(env, info);
                 
-                // 开始真正的 Java Hook
                 hook_java_methods(env);
-                LOGI("Java methods hooked successfully by LSPlant + ShadowHook!");
+                LOGI("Java methods hooked successfully!");
 
-                // 【核心隐蔽点】：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:

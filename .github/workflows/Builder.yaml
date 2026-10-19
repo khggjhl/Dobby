@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (ShadowHook + LSPlant 完美版)
+name: 一键编译 Zygisk 模块 (ShadowHook + LSPlant 终极防套娃版)
 
 on:
   workflow_dispatch:
@@ -14,24 +14,21 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载并修复依赖 (使用精准的 git 分支)
+    - name: 2. 下载并修复依赖
       run: |
         mkdir -p third_party
         
-        # 1. 直接拉取 LSPlant v4.2 分支，避免解压导致的目录嵌套问题
-        echo "下载 LSPlant v4.2..."
+        # 1. 下载 LSPlant v4.2
         git clone --depth 1 -b v4.2 https://github.com/LSPosed/LSPlant.git third_party/lsplant
         
         # 2. 下载 ShadowHook
-        echo "下载 ShadowHook..."
         git clone --depth 1 https://github.com/bytedance/android-inline-hook.git third_party/shadowhook
         
         # 3. 下载 xdl
-        echo "下载 xdl..."
         git clone --depth 1 https://github.com/hexhacking/xDL.git third_party/xdl
 
         # 4. 魔改 ShadowHook 的 CMake 版本限制
-        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
+        SHADOWHOOK_CMAKE=$(find third_party/shadowhook -name "CMakeLists.txt" | grep "src/main/cpp" | head -n 1)
         if [ -f "$SHADOWHOOK_CMAKE" ]; then
             sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
         fi
@@ -69,56 +66,64 @@ jobs:
         EOF
         fi
 
-    - name: 3. 生成 CMakeLists.txt (全盘搜索源码)
+    - name: 3. 生成 CMakeLists.txt (暴力包容所有层级)
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
+        # 【关键修复】把所有可能的套娃层级全部加进头文件搜索路径
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
+            # xdl
+            ${CMAKE_SOURCE_DIR}/third_party/xdl
             ${CMAKE_SOURCE_DIR}/third_party/xdl/include
+            ${CMAKE_SOURCE_DIR}/third_party/xdl/xdl/include
+            ${CMAKE_SOURCE_DIR}/third_party/xdl/xdl/src/main/cpp
             ${CMAKE_SOURCE_DIR}/third_party/xdl/src
+            # lsplant
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
+            # shadowhook
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/include
             ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
         )
         
-        # 静态编译 ShadowHook
-        set(SHADOWHOOK_STATIC ON CACHE BOOL "")
-        add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
-
-        # 编译 xdl
+        # 1. 编译 xdl (全盘抓取 .c)
         file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 编译 LSPlant (暴力全盘搜索 .cc 文件)
-        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/*.cc")
-        if(NOT LSPLANT_SOURCES)
-            # 如果没找到，说明路径变了，直接全盘搜
-            file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
-            list(FILTER LSPLANT_SOURCES EXCLUDE REGEX ".*/test.*")
-            list(FILTER LSPLANT_SOURCES EXCLUDE REGEX ".*/tests.*")
+        # 2. 编译 ShadowHook (直接找它的 CMake 目录)
+        set(SHADOWHOOK_DIR "")
+        if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt")
+            set(SHADOWHOOK_DIR "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp")
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/shadowhook/src/main/cpp/CMakeLists.txt")
+            set(SHADOWHOOK_DIR "${CMAKE_SOURCE_DIR}/third_party/shadowhook/src/main/cpp")
         endif()
         
-        if(NOT LSPLANT_SOURCES)
-            message(FATAL_ERROR "❌ 致命错误: 翻遍了目录依然找不到 LSPlant 源码！")
+        if(NOT SHADOWHOOK_DIR)
+            message(FATAL_ERROR "❌ 致命错误: 找不到 ShadowHook 的 CMakeLists.txt！")
         endif()
 
-        # 查找 xz_stub.c
+        set(SHADOWHOOK_STATIC ON CACHE BOOL "")
+        add_subdirectory(${SHADOWHOOK_DIR})
+
+        # 3. 编译 LSPlant (全盘抓取 .cc)
+        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
         file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/*/xz_stub.c")
-        
         add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
         target_link_libraries(lsplant xdl log shadowhook)
 
-        # 编译 Zygisk 模块
+        # 4. 编译 Zygisk 模块
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
-        
-        # 忽略 Zygisk 运行时符号找不到的问题
         target_link_options(finger_spoof_zygisk PRIVATE -Wl,--allow-shlib-undefined)
         EOF
 
@@ -199,9 +204,6 @@ jobs:
             return std::string(fv.fake, fv.len);
         }
 
-        // ==========================================
-        // 1. 将 ShadowHook 接入 LSPlant 的底层引擎
-        // ==========================================
         void* inline_hooker(void* target, void* hooker) {
             return shadowhook_hook_func_addr(target, hooker, nullptr);
         }
@@ -218,11 +220,7 @@ jobs:
             return sym;
         }
 
-        // ==========================================
-        // 2. 纯正 Java 层 Hook
-        // ==========================================
         static void hook_java_methods(JNIEnv *env) {
-            // 拦截 Android ID
             std::string fake_id = get_fake(1); 
             if (!fake_id.empty()) {
                 jclass secureClass = env->FindClass("android/provider/Settings$Secure");
@@ -245,7 +243,6 @@ jobs:
                 }
             }
             
-            // 拦截 IMEI
             std::string fake_imei = get_fake(2);
             if (!fake_imei.empty()) {
                 jclass tmClass = env->FindClass("android/telephony/TelephonyManager");

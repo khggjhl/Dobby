@@ -47,7 +47,7 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 5. 修补依赖与魔改 CMake 版本
+    - name: 5. 修补依赖与魔改源码
       run: |
         # 1. 强行把 ShadowHook 的 CMake 版本限制降级，否则会报错
         SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
@@ -56,7 +56,15 @@ jobs:
             echo "✅ 已魔改 ShadowHook 的 CMake 版本限制"
         fi
 
-        # 2. 修补 LSPlant 的 xz 依赖
+        # 2. 【核心修复】暴力移除 LSPlant 中的 C++ 20 Modules 语法
+        find third_party/lsplant -name "*.cc" -exec sed -i '/^module lsplant;/d' {} +
+        find third_party/lsplant -name "*.cc" -exec sed -i '/^module;/d' {} +
+        find third_party/lsplant -name "*.cc" -exec sed -i 's/^export //g' {} +
+        find third_party/lsplant -name "*.hpp" -exec sed -i 's/^export //g' {} +
+        find third_party/lsplant -name "*.h" -exec sed -i 's/^export //g' {} +
+        echo "✅ 已暴力移除 LSPlant 的 Modules 语法"
+
+        # 3. 修补 LSPlant 的 xz 依赖
         find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
         find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
         
@@ -95,7 +103,8 @@ jobs:
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
-        set(CMAKE_CXX_STANDARD 20)
+        # 降级为 C++17，彻底断绝 Modules 念想
+        set(CMAKE_CXX_STANDARD 17)
         
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk

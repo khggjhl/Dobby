@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (ShadowHook + LSPlant 绝对不报错版)
+name: 一键编译 Zygisk 模块 (纯 C++ 直捣黄龙版)
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 20
 
     steps:
     - name: 1. 准备 NDK
@@ -14,102 +14,38 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载并修复依赖 (彻底根除套娃)
+    - name: 2. 下载 ShadowHook 预编译包 (免去源码编译烦恼)
       run: |
-        mkdir -p third_party
-        
-        # 1. 下载 LSPlant v4.2
-        wget -q https://github.com/LSPosed/LSPlant/archive/refs/tags/v4.2.zip -O lsplant.zip
-        unzip -q lsplant.zip && mv LSPlant-4.2 third_party/lsplant
-        
-        # 2. 下载 ShadowHook
-        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
-        unzip -q shadowhook.zip && mv android-inline-hook-main third_party/shadowhook
-        
-        # 3. 下载 xdl 并清理多层嵌套
-        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
-        unzip -q xdl.zip && mv xDL-master third_party/xdl
+        mkdir -p third_party/shadowhook
+        # 下载字节官方发布在 Maven 的预编译 AAR
+        wget -q https://repo1.maven.org/maven2/com/bytedance/android/shadowhook/2.0.1/shadowhook-2.0.1.aar -O shadowhook.aar
+        unzip -q shadowhook.aar -d third_party/shadowhook
 
-        # 4. 魔改 ShadowHook 的 CMake 版本限制
-        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
-        if [ -f "$SHADOWHOOK_CMAKE" ]; then
-            sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
-        fi
-
-        # 5. 打补丁：去掉 LSPlant 的 xz 依赖
-        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
-        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
-        UTILS_DIR=$(find third_party/lsplant -type d -name "utils" | head -n 1)
-        if [ -n "$UTILS_DIR" ]; then
-            cat << 'EOF' > $UTILS_DIR/xz.h
-        #pragma once
-        #include <stddef.h>
-        #include <stdint.h>
-        #ifdef __cplusplus
-        extern "C" {
-        #endif
-        enum xz_mode { XZ_SINGLE, XZ_PREALLOC, XZ_DYNALLOC };
-        enum xz_ret { XZ_OK, XZ_STREAM_END, XZ_MEMLIMIT_ERROR, XZ_FORMAT_ERROR, XZ_OPTIONS_ERROR, XZ_DATA_ERROR, XZ_BUF_ERROR };
-        struct xz_buf { const uint8_t *in; size_t in_pos; size_t in_size; uint8_t *out; size_t out_pos; size_t out_size; };
-        struct xz_dec;
-        struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max);
-        enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b);
-        void xz_dec_end(struct xz_dec *s);
-        void xz_crc32_init(void);
-        #ifdef __cplusplus
-        }
-        #endif
-        EOF
-            cat << 'EOF' > $UTILS_DIR/xz_stub.c
-        #include "xz.h"
-        struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max) { return 0; }
-        enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b) { return XZ_DATA_ERROR; }
-        void xz_dec_end(struct xz_dec *s) {}
-        void xz_crc32_init(void) {}
-        EOF
-        fi
-
-    - name: 3. 生成 CMakeLists.txt (动态全盘包含头文件)
+    - name: 3. 生成 CMakeLists.txt
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
-        # 【终极魔法】：动态收集 third_party 下所有的 include 目录
-        file(GLOB_RECURSE ALL_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/*/include")
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            ${ALL_INCLUDE_DIRS}
-            # 兜底，以防有头文件在 src 下面
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/src
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/prefab/modules/shadowhook/include
         )
-        
-        # 1. 编译 xdl (全盘搜索 .c 文件)
-        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
-        add_library(xdl STATIC ${XDL_SOURCES})
-        target_link_libraries(xdl log)
 
-        # 2. 编译 ShadowHook
-        set(SHADOWHOOK_STATIC ON CACHE BOOL "")
-        add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
+        # 链接 ShadowHook 预编译静态库
+        add_library(shadowhook STATIC IMPORTED)
+        set_target_properties(shadowhook PROPERTIES IMPORTED_LOCATION
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/prefab/modules/shadowhook/libs/android.arm64-v8a/libshadowhook.a
+        )
 
-        # 3. 编译 LSPlant (全盘搜索 .cc 文件)
-        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
-        file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/*/xz_stub.c")
-        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
-        target_link_libraries(lsplant xdl log shadowhook)
-
-        # 4. 编译 Zygisk 模块
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
-        target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook)
+        target_link_libraries(finger_spoof_zygisk log android shadowhook c++_shared)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
         target_link_options(finger_spoof_zygisk PRIVATE -Wl,--allow-shlib-undefined)
         EOF
 
-    - name: 4. 生成核心 zygisk.cpp
+    - name: 4. 生成 zygisk.hpp
       run: |
         mkdir -p third_party/zygisk
         cat << 'EOF' > third_party/zygisk/zygisk.hpp
@@ -137,6 +73,8 @@ jobs:
         }
         EOF
 
+    - name: 5. 生成核心 zygisk.cpp (纯 C++ 桥接 Hook)
+      run: |
         cat << 'EOF' > zygisk.cpp
         #include <jni.h>
         #include <android/log.h>
@@ -148,10 +86,7 @@ jobs:
         #include <netinet/in.h>
         #include <mutex>
         #include <string>
-        #include <dlfcn.h>
         #include "zygisk.hpp"
-        #include "lsplant.hpp"
-        #include "xdl.h"
         #include "shadowhook.h"
 
         #define TAG "fp-zygisk"
@@ -186,57 +121,63 @@ jobs:
             return std::string(fv.fake, fv.len);
         }
 
-        void* inline_hooker(void* target, void* hooker) {
-            return shadowhook_hook_func_addr(target, hooker, nullptr);
+        // ========================================================
+        // 【核心替换】：纯 C++ 桥接函数，直接接管 Java 方法执行！
+        // ========================================================
+        
+        // 1. 定义原始函数指针
+        static jstring (*orig_getString)(JNIEnv*, jclass, jobject, jstring) = nullptr;
+        static jstring (*orig_getImei)(JNIEnv*, jobject) = nullptr;
+
+        // 2. 伪装 `Settings.Secure.getString`
+        static jstring fake_getString(JNIEnv* env, jclass clazz, jobject resolver, jstring name) {
+            if (name) {
+                const char* c_name = env->GetStringUTFChars(name, nullptr);
+                if (c_name && strcmp(c_name, "android_id") == 0) {
+                    env->ReleaseStringUTFChars(name, c_name);
+                    std::string fake_id = get_fake(1);
+                    return env->NewStringUTF(fake_id.c_str());
+                }
+                env->ReleaseStringUTFChars(name, c_name);
+            }
+            // 不是 android_id，调用原方法
+            return orig_getString ? orig_getString(env, clazz, resolver, name) : nullptr;
         }
 
-        bool inline_unhooker(void* func) {
-            return shadowhook_unhook(func) == 0;
+        // 3. 伪装 `TelephonyManager.getImei`
+        static jstring fake_getImei(JNIEnv* env, jobject thiz) {
+            std::string fake_imei = get_fake(2);
+            return env->NewStringUTF(fake_imei.c_str());
         }
 
-        void* art_symbol_resolver(std::string_view symbol_name) {
-            void* handle = xdl_open("libart.so", XDL_DEFAULT);
-            if (!handle) return nullptr;
-            void* sym = xdl_sym(handle, symbol_name.data(), nullptr);
-            xdl_close(handle);
-            return sym;
+        // 获取 ArtMethod 的 entry_point 偏移量 (Android 15 ARM64 下通常是 32)
+        void* get_entry_point(void* art_method) {
+            return *(void**)((uintptr_t)art_method + 32);
         }
 
         static void hook_java_methods(JNIEnv *env) {
-            std::string fake_id = get_fake(1); 
-            if (!fake_id.empty()) {
-                jclass secureClass = env->FindClass("android/provider/Settings$Secure");
-                if (secureClass) {
-                    jmethodID mid = env->GetStaticMethodID(secureClass, "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;");
-                    if (mid) {
-                        lsplant::Hook(env, mid, [fake_id](JNIEnv* e, jobject thiz, jobject resolver, jstring name) -> jobject {
-                            if (name) {
-                                const char* c_name = e->GetStringUTFChars(name, nullptr);
-                                if (c_name && strcmp(c_name, "android_id") == 0) {
-                                    e->ReleaseStringUTFChars(name, c_name);
-                                    return e->NewStringUTF(fake_id.c_str());
-                                }
-                                e->ReleaseStringUTFChars(name, c_name);
-                            }
-                            return nullptr; 
-                        });
-                    }
-                    env->DeleteLocalRef(secureClass);
+            // Hook Android ID
+            jclass secureClass = env->FindClass("android/provider/Settings$Secure");
+            if (secureClass) {
+                jmethodID mid = env->GetStaticMethodID(secureClass, "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;");
+                if (mid) {
+                    void* entry = get_entry_point((void*)mid);
+                    shadowhook_hook_func_addr(entry, (void*)fake_getString, (void**)&orig_getString);
+                    LOGI("Hooked Settings.Secure.getString!");
                 }
+                env->DeleteLocalRef(secureClass);
             }
-            
-            std::string fake_imei = get_fake(2);
-            if (!fake_imei.empty()) {
-                jclass tmClass = env->FindClass("android/telephony/TelephonyManager");
-                if (tmClass) {
-                    jmethodID mid = env->GetMethodID(tmClass, "getImei", "()Ljava/lang/String;");
-                    if (mid) {
-                        lsplant::Hook(env, mid, [fake_imei](JNIEnv* e, jobject thiz) -> jobject {
-                            return e->NewStringUTF(fake_imei.c_str());
-                        });
-                    }
-                    env->DeleteLocalRef(tmClass);
+
+            // Hook IMEI
+            jclass tmClass = env->FindClass("android/telephony/TelephonyManager");
+            if (tmClass) {
+                jmethodID mid = env->GetMethodID(tmClass, "getImei", "()Ljava/lang/String;");
+                if (mid) {
+                    void* entry = get_entry_point((void*)mid);
+                    shadowhook_hook_func_addr(entry, (void*)fake_getImei, (void**)&orig_getImei);
+                    LOGI("Hooked TelephonyManager.getImei!");
                 }
+                env->DeleteLocalRef(tmClass);
             }
         }
 
@@ -250,16 +191,10 @@ jobs:
 
                 shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
 
-                lsplant::InitInfo info {
-                    .inline_hooker = inline_hooker,
-                    .inline_unhooker = inline_unhooker,
-                    .art_symbol_resolver = art_symbol_resolver
-                };
-                lsplant::Init(env, info);
-                
+                // 执行纯 C++ 桥接 Hook
                 hook_java_methods(env);
-                LOGI("Java methods hooked successfully!");
 
+                // 极限隐蔽：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:
@@ -270,20 +205,24 @@ jobs:
         JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
         EOF
 
-    - name: 5. 编译
+    - name: 6. 编译
       run: |
         mkdir build && cd build
         cmake .. -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake -DANDROID_ABI=arm64-v8a -DANDROID_PLATFORM=android-30
         make
 
-    - name: 6. 打包
+    - name: 7. 打包 (附带 c++ 运行库)
       run: |
         mkdir -p module/zygisk/arm64-v8a
         cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
+        
+        CXX_SHARED=$(find $ANDROID_NDK_HOME -name "libc++_shared.so" | grep arm64-v8a | head -n 1)
+        cp "$CXX_SHARED" module/zygisk/arm64-v8a/
+        
         printf "id=fp_sensor\nname=OPLUS Sensor Helper\nversion=v1.0\nversionCode=1\nauthor=Anonymous\ndescription=Hardware abstraction layer for oplus.\n" > module/module.prop
         cd module && zip -r ../FP_Zygisk_Module.zip *
 
-    - name: 7. 上传
+    - name: 8. 上传
       uses: actions/upload-artifact@v4
       with:
         name: FP_Zygisk_Module

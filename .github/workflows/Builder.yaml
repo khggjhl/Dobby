@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (Pine 终极无痕隐藏版)
+name: 一键编译 Zygisk 模块 (ShadowHook + LSPlant 完美版)
 
 on:
   workflow_dispatch:
@@ -14,59 +14,38 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载并修复 Pine 源码
+    - name: 2. 下载并修复依赖
       run: |
         mkdir -p third_party
-        git clone --depth 1 https://github.com/canyie/pine.git third_party/pine
         
-        # 1. 修复 scoped_local_ref.h
-        cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/scoped_local_ref.h
-        #pragma once
-        #include <jni.h>
-        #include <cstddef>
-        #include <cstdint>
-        namespace pine {
-        template <typename T>
-        class ScopedLocalRef {
-         public:
-          ScopedLocalRef(JNIEnv* env) : env_(env), ref_(nullptr) {}
-          ScopedLocalRef(JNIEnv* env, T ref) : env_(env), ref_(ref) {}
-          ~ScopedLocalRef() { if (ref_ != nullptr) env_->DeleteLocalRef(ref_); }
-          T Get() const { return ref_; }
-          T Release() { T ret = ref_; ref_ = nullptr; return ret; }
-          void Reset(T ref = nullptr) { if (ref_ != nullptr) env_->DeleteLocalRef(ref_); ref_ = ref; }
-          bool IsNull() const { return ref_ == nullptr; }
-          JNIEnv* Env() const { return env_; }
-         private:
-          JNIEnv* env_;
-          T ref_;
-        };
-        class ScopedLocalClassRef : public ScopedLocalRef<jclass> {
-         public:
-          ScopedLocalClassRef(JNIEnv* env) : ScopedLocalRef<jclass>(env) {}
-          ScopedLocalClassRef(JNIEnv* env, jclass ref) : ScopedLocalRef<jclass>(env, ref) {}
-          ScopedLocalClassRef(JNIEnv* env, const char* name) : ScopedLocalRef<jclass>(env, env->FindClass(name)) {}
-          jmethodID GetMethodID(const char* name, const char* signature) { return Env()->GetMethodID(Get(), name, signature); }
-          jmethodID GetStaticMethodID(const char* name, const char* signature) { return Env()->GetStaticMethodID(Get(), name, signature); }
-          jmethodID FindMethodID(const char* name, const char* signature) { return Env()->GetMethodID(Get(), name, signature); }
-        };
-        class ScopedLocalUtfStringRef : public ScopedLocalRef<jstring> {
-         public:
-          ScopedLocalUtfStringRef(JNIEnv* env) : ScopedLocalRef<jstring>(env) {}
-          ScopedLocalUtfStringRef(JNIEnv* env, jstring ref) : ScopedLocalRef<jstring>(env, ref) {}
-          ScopedLocalUtfStringRef(JNIEnv* env, const char* content) : ScopedLocalRef<jstring>(env, env->NewStringUTF(content)) {}
-        };
-        }
-        EOF
+        # 1. 下载完美支持 Lambda 的 LSPlant v4.2
+        echo "下载 LSPlant v4.2..."
+        wget -q https://github.com/LSPosed/LSPlant/archive/refs/tags/v4.2.zip -O lsplant.zip
+        unzip -q lsplant.zip && mv LSPlant-4.2 third_party/lsplant
+        
+        # 2. 下载 ShadowHook
+        echo "下载 ShadowHook..."
+        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
+        unzip -q shadowhook.zip && mv android-inline-hook-main third_party/shadowhook
+        
+        # 3. 下载 xdl (用于找符号)
+        echo "下载 xdl..."
+        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
+        unzip -q xdl.zip && mv xDL-master third_party/xdl
 
-        # 2. 修复命名空间
-        sed -i 's/ ScopedLocalClassRef / pine::ScopedLocalClassRef /g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
-        sed -i 's/(ScopedLocalClassRef/(pine::ScopedLocalClassRef/g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
+        # 4. 魔改 ShadowHook 的 CMake 版本限制 (它官方要求 4.0，导致 GitHub 报错)
+        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
+        if [ -f "$SHADOWHOOK_CMAKE" ]; then
+            sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
+            echo "✅ 已修复 ShadowHook 的 CMake 版本限制"
+        fi
 
-        # 3. 修复 xz.h
-        sed -i 's|#include <linux/xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
-        sed -i 's|#include <xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
-        cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/xz.h
+        # 5. 打补丁：去掉 LSPlant 的 xz 依赖
+        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
+        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
+        UTILS_DIR=$(find third_party/lsplant -type d -name "utils" | head -n 1)
+        if [ -n "$UTILS_DIR" ]; then
+            cat << 'EOF' > $UTILS_DIR/xz.h
         #pragma once
         #include <stddef.h>
         #include <stdint.h>
@@ -85,35 +64,14 @@ jobs:
         }
         #endif
         EOF
-        cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/xz_stub.c
+            cat << 'EOF' > $UTILS_DIR/xz_stub.c
         #include "xz.h"
         struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max) { return 0; }
         enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b) { return XZ_DATA_ERROR; }
         void xz_dec_end(struct xz_dec *s) {}
         void xz_crc32_init(void) {}
         EOF
-
-        # 4. 【终极修复】自己补一个真实的 pine.h 放进去，让编译器找得到！
-        cat << 'EOF' > third_party/pine/core/src/main/cpp/pine.h
-        #pragma once
-        #include <jni.h>
-        #include <functional>
-
-        namespace pine {
-            struct CallFrame {
-                JNIEnv* env;
-                jobject* args;
-                jobject result;
-                void setResult(jobject result);
-            };
-
-            class Pine {
-            public:
-                static bool init();
-                static bool hook(JNIEnv* env, jmethodID method, std::function<void(CallFrame*)> callback);
-            };
-        }
-        EOF
+        fi
 
     - name: 3. 生成 CMakeLists.txt
       run: |
@@ -124,51 +82,47 @@ jobs:
         
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp
-            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/art
-            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline
-            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils
+            ${CMAKE_SOURCE_DIR}/third_party/xdl/include
+            ${CMAKE_SOURCE_DIR}/third_party/xdl/src
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
         )
         
-        file(GLOB_RECURSE PINE_SOURCES 
-            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/android.cpp"
-            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/jni_bridge.cpp"
-            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/pine.cpp"
-            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/art/*.cpp"
-            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline/*.cpp"
-            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline/*.S"
-            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils/*.cpp"
-            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils/xz_stub.c"
-        )
-        list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/thumb2.cpp")
-        list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/arm32.cpp")
-        list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/x86.cpp")
-        list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/x86_64.cpp")
+        # 静态编译 ShadowHook
+        set(SHADOWHOOK_STATIC ON CACHE BOOL "")
+        add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
 
-        add_library(pine STATIC ${PINE_SOURCES})
-        target_link_libraries(pine log)
+        # 编译 xdl
+        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
+        add_library(xdl STATIC ${XDL_SOURCES})
+        target_link_libraries(xdl log)
 
+        # 编译 LSPlant
+        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/*.cc")
+        file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
+        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
+        target_link_libraries(lsplant xdl log shadowhook)
+
+        # 编译 Zygisk 模块
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
-        target_link_libraries(finger_spoof_zygisk log android pine)
-        
+        target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
         
-        # 【关键修复】告诉链接器：Zygisk 的 Api 接口是在运行时提供的，允许未定义符号
+        # 忽略 Zygisk 运行时符号找不到的问题
         target_link_options(finger_spoof_zygisk PRIVATE -Wl,--allow-shlib-undefined)
         EOF
 
-    - name: 4. 生成 zygisk.cpp 和 zygisk.hpp
+    - name: 4. 生成核心 zygisk.cpp
       run: |
         mkdir -p third_party/zygisk
         cat << 'EOF' > third_party/zygisk/zygisk.hpp
         #pragma once
         #include <jni.h>
         #include <sys/types.h>
-        #include <cstdint>
-        #include <string_view>
 
         namespace zygisk {
-        struct Api; struct AppSpecializeArgs; struct ServerSpecializeArgs;
+        struct Api; struct AppSpecializeArgs;
         class ModuleBase {
         public:
             virtual void onLoad(Api *api, JNIEnv *env) {}
@@ -198,8 +152,11 @@ jobs:
         #include <netinet/in.h>
         #include <mutex>
         #include <string>
+        #include <dlfcn.h>
         #include "zygisk.hpp"
-        #include "pine.h" // 现在我们自己有这个文件了，直接 include
+        #include "lsplant.hpp"
+        #include "xdl.h"
+        #include "shadowhook.h"
 
         #define TAG "fp-zygisk"
         #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
@@ -233,39 +190,61 @@ jobs:
             return std::string(fv.fake, fv.len);
         }
 
+        // ==========================================
+        // 1. 将 ShadowHook 接入 LSPlant 的底层引擎
+        // ==========================================
+        void* inline_hooker(void* target, void* hooker) {
+            return shadowhook_hook_func_addr(target, hooker, nullptr);
+        }
+
+        bool inline_unhooker(void* func) {
+            return shadowhook_unhook(func) == 0;
+        }
+
+        void* art_symbol_resolver(std::string_view symbol_name) {
+            void* handle = xdl_open("libart.so", XDL_DEFAULT);
+            if (!handle) return nullptr;
+            void* sym = xdl_sym(handle, symbol_name.data(), nullptr);
+            xdl_close(handle);
+            return sym;
+        }
+
+        // ==========================================
+        // 2. 纯正 Java 层 Hook
+        // ==========================================
         static void hook_java_methods(JNIEnv *env) {
+            // 拦截 Android ID
             std::string fake_id = get_fake(1); 
             if (!fake_id.empty()) {
                 jclass secureClass = env->FindClass("android/provider/Settings$Secure");
                 if (secureClass) {
                     jmethodID mid = env->GetStaticMethodID(secureClass, "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;");
                     if (mid) {
-                        pine::Pine::hook(env, mid, [fake_id](pine::CallFrame* callFrame) {
-                            JNIEnv* e = callFrame->env;
-                            jstring name = static_cast<jstring>(callFrame->args[1]);
+                        lsplant::Hook(env, mid, [fake_id](JNIEnv* e, jobject thiz, jobject resolver, jstring name) -> jobject {
                             if (name) {
                                 const char* c_name = e->GetStringUTFChars(name, nullptr);
                                 if (c_name && strcmp(c_name, "android_id") == 0) {
                                     e->ReleaseStringUTFChars(name, c_name);
-                                    callFrame->setResult(e->NewStringUTF(fake_id.c_str()));
-                                    return;
+                                    return e->NewStringUTF(fake_id.c_str()); // 返回假 ID
                                 }
                                 e->ReleaseStringUTFChars(name, c_name);
                             }
+                            return nullptr; // 如果不是 android_id，放行原方法
                         });
                     }
                     env->DeleteLocalRef(secureClass);
                 }
             }
             
+            // 拦截 IMEI
             std::string fake_imei = get_fake(2);
             if (!fake_imei.empty()) {
                 jclass tmClass = env->FindClass("android/telephony/TelephonyManager");
                 if (tmClass) {
                     jmethodID mid = env->GetMethodID(tmClass, "getImei", "()Ljava/lang/String;");
                     if (mid) {
-                        pine::Pine::hook(env, mid, [fake_imei](pine::CallFrame* callFrame) {
-                            callFrame->setResult(callFrame->env->NewStringUTF(fake_imei.c_str()));
+                        lsplant::Hook(env, mid, [fake_imei](JNIEnv* e, jobject thiz) -> jobject {
+                            return e->NewStringUTF(fake_imei.c_str()); // 返回假 IMEI
                         });
                     }
                     env->DeleteLocalRef(tmClass);
@@ -277,14 +256,26 @@ jobs:
         public:
             void onLoad(Api *api, JNIEnv *env) override { this->api = api; this->env = env; }
             void postAppSpecialize(const AppSpecializeArgs *args) override {
-                uid_t uid = getuid();
-                fetch_rule_from_kernel(uid);
+                uid_t pid = getuid();
+                fetch_rule_from_kernel(pid);
                 if (!g_hasRule) return;
 
-                pine::Pine::init();
-                hook_java_methods(env);
+                // 初始化 ShadowHook
+                shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
 
-                // 无痕隐藏：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
+                // 初始化 LSPlant，用 ShadowHook 做底座
+                lsplant::InitInfo info {
+                    .inline_hooker = inline_hooker,
+                    .inline_unhooker = inline_unhooker,
+                    .art_symbol_resolver = art_symbol_resolver
+                };
+                lsplant::Init(env, info);
+                
+                // 开始真正的 Java Hook
+                hook_java_methods(env);
+                LOGI("Java methods hooked successfully by LSPlant + ShadowHook!");
+
+                // 【核心隐蔽点】：Hook 结束后，直接从内存彻底卸载 Zygisk 模块！
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:

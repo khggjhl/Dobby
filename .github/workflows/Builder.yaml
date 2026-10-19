@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (LSPlant Java Hook 终极防断连版)
+name: 一键编译 Zygisk 模块 (LSPlant Java Hook 绝对成功版)
 
 on:
   workflow_dispatch:
@@ -15,30 +15,28 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载依赖 (带备用下载源，防止 GitHub 风控)
+    - name: 2. 下载依赖 (强制使用 wget 稳定下载)
       run: |
         mkdir -p third_party
+        cd third_party
         
-        # 1. 下载 LSPlant
-        git clone --depth 1 https://github.com/LSPosed/LSPlant.git third_party/lsplant || (
-          echo "git clone LSPlant 失败，尝试 wget..."
-          wget -q https://github.com/LSPosed/LSPlant/archive/refs/heads/master.zip -O lsplant.zip
-          unzip -q lsplant.zip && mv LSPlant-master third_party/lsplant
-        )
+        echo "下载 LSPlant..."
+        wget -q https://github.com/LSPosed/LSPlant/archive/refs/heads/master.zip -O lsplant.zip
+        unzip -q lsplant.zip && mv LSPlant-master lsplant
         
-        # 2. 下载 Dobby
-        git clone --depth 1 https://github.com/jmpews/Dobby.git third_party/dobby || (
-          echo "git clone Dobby 失败，尝试 wget..."
-          wget -q https://github.com/jmpews/Dobby/archive/refs/heads/master.zip -O dobby.zip
-          unzip -q dobby.zip && mv Dobby-master third_party/dobby
-        )
+        echo "下载 Dobby..."
+        wget -q https://github.com/jmpews/Dobby/archive/refs/heads/master.zip -O dobby.zip
+        unzip -q dobby.zip && mv Dobby-master dobby
         
-        # 3. 下载 xdl (原 LSPosed/xdl 已失效，换用 hexhacking/xDL 稳定版)
-        git clone --depth 1 https://github.com/hexhacking/xDL.git third_party/xdl || (
-          echo "git clone xdl 失败，尝试 wget..."
-          wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
-          unzip -q xdl.zip && mv xDL-master third_party/xdl
-        )
+        echo "下载 xdl..."
+        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
+        unzip -q xdl.zip && mv xDL-master xdl
+        
+        cd ..
+        echo "===== 检查源码是否就位 ====="
+        echo "LSPlant 源码:" && ls third_party/lsplant/lsplant/src/main/cpp/ | head -n 5
+        echo "xdl 源码:" && ls third_party/xdl/src/main/cpp/ | head -n 5
+        echo "============================"
 
     - name: 3. 生成 zygisk.hpp
       run: |
@@ -116,7 +114,7 @@ jobs:
         target_link_libraries(dobby log)
 
         # ===== 2. 编译 xdl =====
-        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/src/*.cc")
+        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp/*.cc")
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
@@ -175,7 +173,6 @@ jobs:
         static fp_rule g_currentRule;
         static bool g_hasRule = false;
 
-        // 1. LSPlant 的底层 Hook 引擎 (Dobby)
         void* inline_hooker(void* target, void* hooker) {
             void* backup = nullptr;
             if (DobbyHook(target, hooker, &backup) == 0) return backup;
@@ -186,7 +183,6 @@ jobs:
             return DobbyDestroy(func) == 0;
         }
 
-        // 2. LSPlant 的符号解析器 (xdl)
         void* art_symbol_resolver(std::string_view symbol_name) {
             void* handle = xdl_open("libart.so", XDL_DEFAULT);
             if (!handle) return nullptr;
@@ -214,9 +210,7 @@ jobs:
             return std::string(fv.fake, fv.len);
         }
 
-        // 3. Java 层方法替换
         static void hook_java_methods(JNIEnv *env) {
-            // 伪装 Android ID
             std::string fake_id = get_fake(1); 
             if (!fake_id.empty()) {
                 jclass secureClass = env->FindClass("android/provider/Settings$Secure");
@@ -239,7 +233,6 @@ jobs:
                 }
             }
             
-            // 伪装 IMEI
             std::string fake_imei = get_fake(2);
             if (!fake_imei.empty()) {
                 jclass tmClass = env->FindClass("android/telephony/TelephonyManager");

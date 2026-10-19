@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (LSPlant 终极通关版)
+name: 一键编译 Zygisk 模块 (LSPlant 最终稳定版)
 
 on:
   workflow_dispatch:
@@ -19,26 +19,29 @@ jobs:
       run: |
         mkdir -p third_party
         
-        # 1. 下载 LSPlant
         for i in {1..5}; do
           git clone --depth 1 https://github.com/LSPosed/LSPlant.git third_party/lsplant && break
           echo "LSPlant 下载失败，重试中..."
           sleep 3
         done
         
-        # 2. 下载 Dobby
         for i in {1..5}; do
           git clone --depth 1 https://github.com/jmpews/Dobby.git third_party/dobby && break
           echo "Dobby 下载失败，重试中..."
           sleep 3
         done
         
-        # 3. 下载 xdl
         for i in {1..5}; do
           git clone --depth 1 https://github.com/hexhacking/xDL.git third_party/xdl && break
           echo "xdl 下载失败，重试中..."
           sleep 3
         done
+        
+        echo "===== 检查源码目录结构 ====="
+        echo "xdl 根目录:" && ls third_party/xdl/
+        echo "xdl src 目录:" && ls third_party/xdl/src/ | head -n 5
+        echo "lsplant 源码目录:" && ls third_party/lsplant/lsplant/src/main/cpp/ | head -n 5
+        echo "==========================="
 
     - name: 3. 生成 zygisk.hpp
       run: |
@@ -97,9 +100,9 @@ jobs:
         
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
             ${CMAKE_SOURCE_DIR}/third_party/dobby/include
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/xdl/src
         )
         
         # ===== 1. 编译 Dobby =====
@@ -115,29 +118,23 @@ jobs:
         add_library(dobby STATIC ${DOBBY_SOURCES})
         target_link_libraries(dobby log)
 
-        # ===== 2. 编译 xdl (修复：加上 *.c 和 *.cc) =====
-        file(GLOB_RECURSE XDL_SOURCES 
-            "${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp/*.cc"
-            "${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp/*.c"
-        )
+        # ===== 2. 编译 xdl (注意：hexhacking/xDL 的源码在 src/ 目录下) =====
+        file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/src/*.c")
         if(NOT XDL_SOURCES)
             message(FATAL_ERROR "❌ 致命错误: 找不到 xdl 源码！")
         endif()
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # ===== 3. 编译 LSPlant (修复：加上 *.c 和 *.cpp) =====
-        file(GLOB_RECURSE LSPLANT_SOURCES 
-            "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.cc"
-            "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.cpp"
-            "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.c"
-        )
+        # ===== 3. 编译 LSPlant =====
+        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.cc")
+        file(GLOB_RECURSE LSPLANT_XZ_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/linux/lib/*.c")
         if(NOT LSPLANT_SOURCES)
             message(FATAL_ERROR "❌ 致命错误: 找不到 LSPlant 源码！")
         endif()
-        add_library(lsplant STATIC ${LSPLANT_SOURCES})
         
-        # 添加 xz 头文件搜索路径
+        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_XZ_SOURCES})
+        
         target_include_directories(lsplant PRIVATE 
             "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/linux/include"
             "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/userspace"

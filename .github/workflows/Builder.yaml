@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (Pine Hook胜利版)
+name: 一键编译 Zygisk 模块 (Pine Hook绝对路径版)
 
 on:
   workflow_dispatch:
@@ -95,10 +95,6 @@ jobs:
         void xz_crc32_init(void) {}
         EOF
 
-        # 暴力确保 pine.h 在正确位置
-        echo "===== 检查 Pine 目录结构 ====="
-        ls -R third_party/pine | head -n 50
-
     - name: 3. 生成 zygisk.hpp
       run: |
         mkdir -p third_party/zygisk
@@ -154,7 +150,6 @@ jobs:
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
-        # 把所有可能的目录都加进去
         include_directories(
             ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
@@ -207,16 +202,8 @@ jobs:
 
         #include "zygisk.hpp"
         
-        // 【修复】加入保底绝对路径，如果找不到直接引全路径
-        #if __has_include("pine.h")
-        #include "pine.h"
-        #elif __has_include("third_party/pine/include/pine.h")
-        #include "third_party/pine/include/pine.h"
-        #elif __has_include("include/pine.h")
-        #include "include/pine.h"
-        #else
-        #error "fatal: pine.h not found anywhere"
-        #endif
+        // 【核心修复】直接硬编码相对路径引入，彻底告别找不到头文件的问题
+        #include "third_party/pine/core/src/main/cpp/pine.h"
 
         #define TAG "fp-zygisk"
         #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)

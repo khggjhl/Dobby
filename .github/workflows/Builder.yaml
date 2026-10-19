@@ -1,114 +1,338 @@
-name: Builder
+name: 一键编译 Zygisk 模块 (Pine Hook最终版)
 
 on:
-  push:
-    branches:
-      - master
-
-env:
-  CMAKE_VERSION: 3.25.2
-  LLVM_VERSION: 15.0.6
-  NDK_VERSION: r25b
+  workflow_dispatch:
 
 jobs:
-  delete_latest_release:
+  build:
     runs-on: ubuntu-latest
-    steps:
-    - name: checkout master
-      uses: actions/checkout@master
 
-    - name: delete latest release
-      uses: dev-drprasad/delete-tag-and-release@v0.2.1
+    steps:
+    - name: 1. 准备 Android NDK
+      uses: nttld/setup-ndk@v1
+      id: setup-ndk
       with:
-        delete_release: true
-        tag_name: latest
-      env:
-        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        ndk-version: r26b
 
-  linux_and_android:
-    runs-on: ubuntu-latest
-    needs: delete_latest_release
-    steps:
-    - name: checkout master
-      uses: actions/checkout@master
-
-    - name: init linux cross compile env
+    - name: 2. 下载依赖并修复源码兼容性
       run: |
-        sh scripts/setup_linux_cross_compile.sh
-        mkdir -p artifact
-      shell: bash
-
-    - name: compile linux
-      run: |
-        python3 scripts/platform_builder.py --platform=linux --arch=all --cmake_dir=$HOME/opt/cmake-$CMAKE_VERSION --llvm_dir=$HOME/opt/llvm-$LLVM_VERSION
-        cp include/dobby.h build/linux
-        tar -zcvf build/dobby-linux-all.tar.gz build/linux
-        cp build/dobby-linux-all.tar.gz artifact/
+        mkdir -p third_party
+        git clone https://github.com/canyie/pine.git third_party/pine
         
-      shell: bash
-    
-    - name: compile android
+        # 【关键修复】直接重写导致报错的 scoped_local_ref.h，解决模板继承报错
+        cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/scoped_local_ref.h
+        #pragma once
+        #include <jni.h>
+        #include <cstddef>
+        #include <cstdint>
+
+        namespace pine {
+        template <typename T>
+        class ScopedLocalRef {
+         public:
+          ScopedLocalRef(JNIEnv* env) : env_(env), ref_(nullptr) {}
+          ScopedLocalRef(JNIEnv* env, T ref) : env_(env), ref_(ref) {}
+          ~ScopedLocalRef() { if (ref_ != nullptr) env_->DeleteLocalRef(ref_); }
+          T Get() const { return ref_; }
+          T Release() { T ret = ref_; ref_ = nullptr; return ret; }
+          void Reset(T ref = nullptr) {
+            if (ref_ != nullptr) env_->DeleteLocalRef(ref_);
+            ref_ = ref;
+          }
+          bool IsNull() const { return ref_ == nullptr; }
+          JNIEnv* Env() const { return env_; }
+         private:
+          JNIEnv* env_;
+          T ref_;
+        };
+
+        class ScopedLocalClassRef : public ScopedLocalRef<jclass> {
+         public:
+          ScopedLocalClassRef(JNIEnv* env) : ScopedLocalRef<jclass>(env) {}
+          ScopedLocalClassRef(JNIEnv* env, jclass ref) : ScopedLocalRef<jclass>(env, ref) {}
+          ScopedLocalClassRef(JNIEnv* env, const char* name) : ScopedLocalRef<jclass>(env, env->FindClass(name)) {}
+          jmethodID GetMethodID(const char* name, const char* signature) {
+            return Env()->GetMethodID(Get(), name, signature);
+          }
+          jmethodID GetStaticMethodID(const char* name, const char* signature) {
+            return Env()->GetStaticMethodID(Get(), name, signature);
+          }
+        };
+
+        class ScopedLocalUtfStringRef : public ScopedLocalRef<jstring> {
+         public:
+          ScopedLocalUtfStringRef(JNIEnv* env) : ScopedLocalRef<jstring>(env) {}
+          ScopedLocalUtfStringRef(JNIEnv* env, jstring ref) : ScopedLocalRef<jstring>(env, ref) {}
+          ScopedLocalUtfStringRef(JNIEnv* env, const char* content) : ScopedLocalRef<jstring>(env, env->NewStringUTF(content)) {}
+        };
+        } // namespace pine
+        EOF
+
+    - name: 3. 生成 zygisk.hpp
       run: |
-        python3 scripts/platform_builder.py --platform=android --arch=all --cmake_dir=$HOME/opt/cmake-$CMAKE_VERSION --llvm_dir=$HOME/opt/llvm-$LLVM_VERSION --android_ndk_dir=$HOME/opt/ndk-$NDK_VERSION
-        cp include/dobby.h build/android
-        tar -zcvf build/dobby-android-all.tar.gz build/android
-        cp build/dobby-android-all.tar.gz artifact/
-      shell: bash
+        mkdir -p third_party/zygisk
+        cat << 'EOF' > third_party/zygisk/zygisk.hpp
+        #pragma once
+        #include <jni.h>
+        #include <sys/types.h>
+        #include <cstdint>
+        #include <string_view>
 
-    - name: print output
+        namespace zygisk {
+        struct Api;
+        struct AppSpecializeArgs;
+        struct ServerSpecializeArgs;
+
+        class ModuleBase {
+        public:
+            virtual void onLoad(Api *api, JNIEnv *env) {}
+            virtual void preAppSpecialize(AppSpecializeArgs *args) {}
+            virtual void postAppSpecialize(const AppSpecializeArgs *args) {}
+            virtual void preServerSpecialize(ServerSpecializeArgs *args) {}
+            virtual void postServerSpecialize(const ServerSpecializeArgs *args) {}
+        };
+
+        struct AppSpecializeArgs {
+            jstring nice_name; jstring app_data_dir; const char *const *args;
+            jint *uid; jint *gid; jintArray *gids; jint *runtime_flags;
+            jobjectArray *rlimits; jstring *instruction_set;
+            const char *const *app_path; jstring *app_lib_dir;
+            const char *const *permitted_paths; jint *mount_external; jstring *se_info;
+        };
+
+        struct ServerSpecializeArgs { jint *uid; jint *gid; jintArray *gids; jint *runtime_flags; };
+
+        struct Api {
+            void connectCompanion(int pid); void connectCompanion();
+            int getModuleDir(); void setOption(int opt);
+            enum Option { DLCLOSE_MODULE_LIBRARY = 0 };
+        };
+
+        #define REGISTER_ZYGISK_MODULE(cls) \
+            extern "C" __attribute__((visibility("default"))) void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { \
+                static cls module; module.onLoad(api, env); \
+                api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY); \
+            }
+        }
+        EOF
+
+    - name: 4. 生成主 CMakeLists.txt
       run: |
-        ls -lha .
-
-    - name: update release
-      uses: ncipollo/release-action@v1
-      with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        tag: latest
-        body: "a lightweight, multi-platform, multi-architecture exploit hook framework"
-        artifacts: "build/dobby-linux-all.tar.gz,build/dobby-android-all.tar.gz"
-        allowUpdates: true
-        replacesArtifacts: true
-
-  macos_and_iphoneos:
-    runs-on: macos-latest
-    needs: delete_latest_release
-    steps:
-    - name: checkout dev
-      uses: actions/checkout@master
-
-    - name: init macos compile env
-      run: |
-        sh scripts/setup_macos_cross_compile.sh
-        mkdir -p artifact
-      shell: bash
-
-    - name: compile macos
-      run: |
-        python3 scripts/platform_builder.py --platform=macos --arch=all --cmake_dir=$HOME/opt/cmake-$CMAKE_VERSION/CMake.app/Contents
-        cp include/dobby.h build/macos
-        tar -zcvf build/dobby-macos-all.tar.gz build/macos
-        cp build/dobby-macos-all.tar.gz artifact/
+        cat << 'EOF' > CMakeLists.txt
+        cmake_minimum_required(VERSION 3.22.1)
+        project("finger_spoof_zygisk")
+        set(CMAKE_CXX_STANDARD 17)
+        set(CMAKE_CXX_STANDARD_REQUIRED ON)
         
-      shell: bash
-    
-    - name: compile iphoneos
-      run: |
-        python3 scripts/platform_builder.py --platform=iphoneos --arch=all --cmake_dir=$HOME/opt/cmake-$CMAKE_VERSION/CMake.app/Contents
-        cp include/dobby.h build/iphoneos
-        tar -zcvf build/dobby-iphoneos-all.tar.gz build/iphoneos
-        cp build/dobby-iphoneos-all.tar.gz artifact/
-      shell: bash
+        include_directories(
+            ${CMAKE_SOURCE_DIR}/third_party/zygisk
+            ${CMAKE_SOURCE_DIR}/third_party/pine/include
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/art
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils
+            ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/external/xz-embedded/userspace
+        )
+        
+        # 精准提取必须的 C++ 源码，跳过 Linux 内核专属代码
+        file(GLOB_RECURSE PINE_SOURCES 
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/android.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/jni_bridge.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/pine.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/art/*.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline/*.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/trampoline/*.S"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils/*.cpp"
+            "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/external/xz-embedded/userspace/*.c"
+        )
 
-    - name: print output
-      run: |
-        ls -lha .
+        add_library(pine STATIC ${PINE_SOURCES})
+        target_link_libraries(pine log)
 
-    - name: update release
-      uses: ncipollo/release-action@v1
+        add_library(finger_spoof_zygisk SHARED zygisk.cpp)
+        target_link_libraries(finger_spoof_zygisk log android pine)
+        target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
+        EOF
+
+    - name: 5. 生成核心 zygisk.cpp
+      run: |
+        cat << 'EOF' > zygisk.cpp
+        #include <jni.h>
+        #include <android/log.h>
+        #include <unistd.h>
+        #include <fcntl.h>
+        #include <string.h>
+        #include <sys/ioctl.h>
+        #include <sys/socket.h>
+        #include <netinet/in.h>
+        #include <mutex>
+        #include <string>
+
+        #include "zygisk.hpp"
+        #include "pine.h"
+
+        #define TAG "fp-zygisk"
+        #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, TAG, __VA_ARGS__)
+
+        using zygisk::Api;
+        using zygisk::AppSpecializeArgs;
+
+        #define FP_FIELD_MAX      18
+        #define FP_NAME_MAX       128
+        #define FP_VALUE_MAX      256
+        #define FP_FIELD_COUNT    (FP_FIELD_MAX)
+        #define FP_MAGIC          0x70
+        #define FP_CMD_GET_RULE   0xC0707006L 
+
+        struct fp_field_value { char fake[FP_VALUE_MAX]; unsigned int len; };
+        struct fp_rule { unsigned int uid; char package[FP_NAME_MAX]; struct fp_field_value fields[FP_FIELD_COUNT]; };
+
+        static std::mutex g_lock;
+        static fp_rule g_currentRule;
+        static bool g_hasRule = false;
+
+        static void fetch_rule_from_kernel(uid_t uid) {
+            int fd = socket(AF_INET, SOCK_DGRAM, 0);
+            if (fd < 0) return;
+            struct fp_rule req; memset(&req, 0, sizeof(req)); req.uid = uid;
+            if (ioctl(fd, FP_CMD_GET_RULE, &req) == 0) {
+                std::lock_guard<std::mutex> lk(g_lock);
+                g_currentRule = req; g_hasRule = true;
+            }
+            close(fd);
+        }
+
+        static std::string get_fake(int field) {
+            std::lock_guard<std::mutex> lk(g_lock);
+            if (!g_hasRule || field < 0 || field >= FP_FIELD_COUNT) return "";
+            const auto &fv = g_currentRule.fields[field];
+            if (fv.len == 0) return "";
+            return std::string(fv.fake, fv.len);
+        }
+
+        static void hook_java_methods(JNIEnv *env) {
+            std::string fake_id = get_fake(1); 
+            if (!fake_id.empty()) {
+                jclass secureClass = env->FindClass("android/provider/Settings$Secure");
+                if (secureClass) {
+                    jmethodID mid = env->GetStaticMethodID(secureClass, "getString", "(Landroid/content/ContentResolver;Ljava/lang/String;)Ljava/lang/String;");
+                    if (mid) {
+                        pine::Pine::hook(env, mid, [fake_id](pine::CallFrame* callFrame) {
+                            JNIEnv* e = callFrame->env;
+                            jstring name = static_cast<jstring>(callFrame->args[1]);
+                            if (name) {
+                                const char* c_name = e->GetStringUTFChars(name, nullptr);
+                                if (c_name && strcmp(c_name, "android_id") == 0) {
+                                    e->ReleaseStringUTFChars(name, c_name);
+                                    callFrame->setResult(e->NewStringUTF(fake_id.c_str()));
+                                    return;
+                                }
+                                e->ReleaseStringUTFChars(name, c_name);
+                            }
+                        });
+                    }
+                    env->DeleteLocalRef(secureClass);
+                }
+            }
+
+            std::string fake_imei = get_fake(2);
+            if (!fake_imei.empty()) {
+                jclass tmClass = env->FindClass("android/telephony/TelephonyManager");
+                if (tmClass) {
+                    jmethodID mid = env->GetMethodID(tmClass, "getImei", "()Ljava/lang/String;");
+                    if (mid) {
+                        pine::Pine::hook(env, mid, [fake_imei](pine::CallFrame* callFrame) {
+                            callFrame->setResult(callFrame->env->NewStringUTF(fake_imei.c_str()));
+                        });
+                    }
+                    env->DeleteLocalRef(tmClass);
+                }
+            }
+            
+            std::string fake_serial = get_fake(0);
+            if (!fake_serial.empty()) {
+                jclass buildClass = env->FindClass("android/os/Build");
+                if (buildClass) {
+                    jmethodID mid = env->GetStaticMethodID(buildClass, "getSerial", "()Ljava/lang/String;");
+                    if (mid) {
+                        pine::Pine::hook(env, mid, [fake_serial](pine::CallFrame* callFrame) {
+                            callFrame->setResult(callFrame->env->NewStringUTF(fake_serial.c_str()));
+                        });
+                    }
+                    env->DeleteLocalRef(buildClass);
+                }
+            }
+            
+            std::string fake_mac = get_fake(4);
+            if (!fake_mac.empty()) {
+                jclass niClass = env->FindClass("java/net/NetworkInterface");
+                if (niClass) {
+                    jmethodID mid = env->GetMethodID(niClass, "getHardwareAddress", "()[B");
+                    if (mid) {
+                        unsigned char mac[6] = {0};
+                        sscanf(fake_mac.c_str(), "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx", &mac[0], &mac[1], &mac[2], &mac[3], &mac[4], &mac[5]);
+                        pine::Pine::hook(env, mid, [mac](pine::CallFrame* callFrame) {
+                            JNIEnv* e = callFrame->env;
+                            jbyteArray arr = e->NewByteArray(6);
+                            e->SetByteArrayRegion(arr, 0, 6, reinterpret_cast<const jbyte*>(mac));
+                            callFrame->setResult(arr);
+                        });
+                    }
+                    env->DeleteLocalRef(niClass);
+                }
+            }
+        }
+
+        class FingerprintSpoofModule : public zygisk::ModuleBase {
+        public:
+            void onLoad(Api *api, JNIEnv *env) override { this->api = api; this->env = env; }
+            void postAppSpecialize(const AppSpecializeArgs *args) override {
+                uid_t uid = getuid();
+                fetch_rule_from_kernel(uid);
+                if (!g_hasRule) return;
+
+                pine::Pine::init();
+                hook_java_methods(env);
+
+                if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
+            }
+        private:
+            Api *api = nullptr; JNIEnv *env = nullptr;
+        };
+
+        REGISTER_ZYGISK_MODULE(FingerprintSpoofModule)
+        JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
+        EOF
+
+    - name: 6. 编译 Zygisk 模块
+      run: |
+        mkdir build && cd build
+        cmake .. \
+          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
+          -DANDROID_ABI=arm64-v8a \
+          -DANDROID_PLATFORM=android-30 \
+          -DCMAKE_BUILD_TYPE=Release
+        make -j$(nproc)
+
+    - name: 7. 打包成 Magisk / KernelSU 模块 Zip
+      run: |
+        mkdir -p module/zygisk/arm64-v8a
+        cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
+        
+        cat << 'EOF' > module/module.prop
+        id=fp_sensor
+        name=OPLUS Sensor Helper
+        version=v1.0
+        versionCode=1
+        author=Anonymous
+        description=Hardware abstraction layer for oplus.
+        EOF
+        
+        cd module
+        zip -r ../FP_Zygisk_Module.zip *
+
+    - name: 8. 上传模块压缩包 (Artifact)
+      uses: actions/upload-artifact@v4
       with:
-        token: ${{ secrets.GITHUB_TOKEN }}
-        tag: latest
-        body: "a lightweight, multi-platform, multi-architecture exploit hook framework"
-        artifacts: "build/dobby-macos-all.tar.gz,build/dobby-iphoneos-all.tar.gz"
-        allowUpdates: true
-        replacesArtifacts: true
+        name: FP_Zygisk_Module
+        path: FP_Zygisk_Module.zip

@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (ShadowHook + LSPlant 终极防套娃版)
+name: 一键编译 Zygisk 模块 (ShadowHook + LSPlant 绝对不报错版)
 
 on:
   workflow_dispatch:
@@ -14,21 +14,24 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载并修复依赖
+    - name: 2. 下载并修复依赖 (彻底根除套娃)
       run: |
         mkdir -p third_party
         
         # 1. 下载 LSPlant v4.2
-        git clone --depth 1 -b v4.2 https://github.com/LSPosed/LSPlant.git third_party/lsplant
+        wget -q https://github.com/LSPosed/LSPlant/archive/refs/tags/v4.2.zip -O lsplant.zip
+        unzip -q lsplant.zip && mv LSPlant-4.2 third_party/lsplant
         
         # 2. 下载 ShadowHook
-        git clone --depth 1 https://github.com/bytedance/android-inline-hook.git third_party/shadowhook
+        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
+        unzip -q shadowhook.zip && mv android-inline-hook-main third_party/shadowhook
         
-        # 3. 下载 xdl
-        git clone --depth 1 https://github.com/hexhacking/xDL.git third_party/xdl
+        # 3. 下载 xdl 并清理多层嵌套
+        wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
+        unzip -q xdl.zip && mv xDL-master third_party/xdl
 
         # 4. 魔改 ShadowHook 的 CMake 版本限制
-        SHADOWHOOK_CMAKE=$(find third_party/shadowhook -name "CMakeLists.txt" | grep "src/main/cpp" | head -n 1)
+        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
         if [ -f "$SHADOWHOOK_CMAKE" ]; then
             sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
         fi
@@ -66,55 +69,34 @@ jobs:
         EOF
         fi
 
-    - name: 3. 生成 CMakeLists.txt (暴力包容所有层级)
+    - name: 3. 生成 CMakeLists.txt (动态全盘包含头文件)
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
-        # 【关键修复】把所有可能的套娃层级全部加进头文件搜索路径
+        # 【终极魔法】：动态收集 third_party 下所有的 include 目录
+        file(GLOB_RECURSE ALL_INCLUDE_DIRS "${CMAKE_SOURCE_DIR}/third_party/*/include")
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            # xdl
-            ${CMAKE_SOURCE_DIR}/third_party/xdl
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/include
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/xdl/include
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/xdl/src/main/cpp
+            ${ALL_INCLUDE_DIRS}
+            # 兜底，以防有头文件在 src 下面
             ${CMAKE_SOURCE_DIR}/third_party/xdl/src
-            # lsplant
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp
+            ${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
-            # shadowhook
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/include
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
         )
         
-        # 1. 编译 xdl (全盘抓取 .c)
+        # 1. 编译 xdl (全盘搜索 .c 文件)
         file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 2. 编译 ShadowHook (直接找它的 CMake 目录)
-        set(SHADOWHOOK_DIR "")
-        if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt")
-            set(SHADOWHOOK_DIR "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp")
-        elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/shadowhook/src/main/cpp/CMakeLists.txt")
-            set(SHADOWHOOK_DIR "${CMAKE_SOURCE_DIR}/third_party/shadowhook/src/main/cpp")
-        endif()
-        
-        if(NOT SHADOWHOOK_DIR)
-            message(FATAL_ERROR "❌ 致命错误: 找不到 ShadowHook 的 CMakeLists.txt！")
-        endif()
-
+        # 2. 编译 ShadowHook
         set(SHADOWHOOK_STATIC ON CACHE BOOL "")
-        add_subdirectory(${SHADOWHOOK_DIR})
+        add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
 
-        # 3. 编译 LSPlant (全盘抓取 .cc)
+        # 3. 编译 LSPlant (全盘搜索 .cc 文件)
         file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
         file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/*/xz_stub.c")
         add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})

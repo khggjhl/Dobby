@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (Pine Hook终极自修复版)
+name: 一键编译 Zygisk 模块 (Pine Hook终极通关版)
 
 on:
   workflow_dispatch:
@@ -20,7 +20,7 @@ jobs:
         mkdir -p third_party
         git clone --depth 1 https://github.com/canyie/pine.git third_party/pine
         
-        # 【修复1】重写 scoped_local_ref.h，补全头文件、缺少的方法，以及命名空间
+        # 【修复1】重写 scoped_local_ref.h
         cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/scoped_local_ref.h
         #pragma once
         #include <jni.h>
@@ -60,15 +60,13 @@ jobs:
         }
         EOF
 
-        # 【修复2】强制给源码里缺命名空间的地方加上 pine::
         sed -i 's/ ScopedLocalClassRef / pine::ScopedLocalClassRef /g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
         sed -i 's/(ScopedLocalClassRef/(pine::ScopedLocalClassRef/g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
 
-        # 【修复3】解决 xz.h 缺失问题，加入 xz_crc32_init
+        # 【修复2】解决 xz.h 缺失
         sed -i 's|#include <linux/xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
         sed -i 's|#include <xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
         
-        # 伪造一个空的 xz.h 和 xz_stub.c
         cat << 'EOF' > third_party/pine/core/src/main/cpp/utils/xz.h
         #pragma once
         #include <stddef.h>
@@ -83,7 +81,6 @@ jobs:
         struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max);
         enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b);
         void xz_dec_end(struct xz_dec *s);
-        // 【补全】增加 xz_crc32_init 声明
         void xz_crc32_init(void);
         #ifdef __cplusplus
         }
@@ -95,9 +92,12 @@ jobs:
         struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max) { return 0; }
         enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b) { return XZ_DATA_ERROR; }
         void xz_dec_end(struct xz_dec *s) {}
-        // 【补全】增加空实现
         void xz_crc32_init(void) {}
         EOF
+
+        # 【修复3】暴力搜索 pine.h 并放到能被找到的根目录
+        find third_party/pine -name "pine.h" -exec cp {} third_party/pine/ \;
+        cp third_party/pine/pine.h . || true
 
     - name: 3. 生成 zygisk.hpp
       run: |
@@ -154,8 +154,11 @@ jobs:
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
+        # 【修复】把所有可能的目录全加进来，绝对不让它找不到
         include_directories(
+            ${CMAKE_SOURCE_DIR}
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
+            ${CMAKE_SOURCE_DIR}/third_party/pine
             ${CMAKE_SOURCE_DIR}/third_party/pine/include
             ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp
             ${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/art
@@ -174,7 +177,6 @@ jobs:
             "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils/xz_stub.c"
         )
 
-        # 剔除不兼容的架构
         list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/thumb2.cpp")
         list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/arm32.cpp")
         list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/x86.cpp")
@@ -182,16 +184,15 @@ jobs:
 
         add_library(pine STATIC ${PINE_SOURCES})
         target_link_libraries(pine log)
-        # 【修复4】修正警告参数 -Wno-nontrivial-memcall -> -Wno-nontrivial-memaccess
         target_compile_options(pine PRIVATE -Wno-format -Wno-nontrivial-memaccess)
 
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android pine)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
-        EOF
+EOF
 
-    - name: 5. 生成核心 zygisk.cpp
-      run: |
+    - 姓名: 5. 生成核心 zygisk.cpp
+跑: |
         cat << 'EOF' > zygisk.cpp
         #include <jni.h>
         #include <android/log.h>
@@ -205,6 +206,7 @@ jobs:
         #include <string>
 
         #include "zygisk.hpp"
+        // 尝试只写文件名，让 CMake 自己去搜索
         #include "pine.h"
 
         #define TAG "fp-zygisk"
@@ -220,29 +222,29 @@ jobs:
         #define FP_MAGIC          0x70
         #define FP_CMD_GET_RULE   0xC0707006L 
 
-        struct fp_field_value { char fake[FP_VALUE_MAX]; unsigned int len; };
-        struct fp_rule { unsigned int uid; char package[FP_NAME_MAX]; struct fp_field_value fields[FP_FIELD_COUNT]; };
+结构fp_field_value{char fake[FP_VALUE_MAX]；unsigned int len；}；
+结构fp_rule{unsigned int uid；char包[FP_NAME_MAX]；结构fp_field_value字段[FP_FIELD_COUNT]；}；
 
-        static std::mutex g_lock;
-        static fp_rule g_currentRule;
-        static bool g_hasRule = false;
+静态std：：互斥体g_lock；
+静态fp_rule g_currentRule；
+静态bool g_hasRule=false；
 
-        static void fetch_rule_from_kernel(uid_t uid) {
-            int fd = socket(AF_INET, SOCK_DGRAM, 0);
-            if (fd < 0) return;
-            struct fp_rule req; memset(&req, 0, sizeof(req)); req.uid = uid;
-            if (ioctl(fd, FP_CMD_GET_RULE, &req) == 0) {
-                std::lock_guard<std::mutex> lk(g_lock);
-                g_currentRule = req; g_hasRule = true;
+静态空值fetch_rule_from_kernel(uid_tuid){
+int fd=套接字(AF_INET，SOCK_Dgram，0)；
+if(fd<0)返回；
+结构fp_rule req；memset(&req，0，sizeof(req))；req.uid=uid；
+if(ioctl(fd，FP_CMD_GET_RULE，&req)==0){
+STD：：lock_guard<std：：mutex>lk(g_lock)；
+G_currentRule=req；g_hasRule=true；
             }
-            close(fd);
+关闭(fd)；
         }
 
-        static std::string get_fake(int field) {
-            std::lock_guard<std::mutex> lk(g_lock);
-            if (!g_hasRule || field < 0 || field >= FP_FIELD_COUNT) return "";
-            const auto &fv = g_currentRule.fields[field];
-            if (fv.len == 0) return "";
+静态std：：string get_fake(int字段){
+STD：：lock_guard<std：：mutex>lk(g_lock)；
+if(！G_hasRule||field<0||field>=FP_FIELD_COUNT)返回""；
+常数auto&fv=g_currentRule.fields[field]；
+if(fv.len==0)返回""；
             return std::string(fv.fake, fv.len);
         }
 
@@ -310,65 +312,65 @@ jobs:
                         pine::Pine::hook(env, mid, [mac](pine::CallFrame* callFrame) {
                             JNIEnv* e = callFrame->env;
                             jbyteArray arr = e->NewByteArray(6);
-                            e->SetByteArrayRegion(arr, 0, 6, reinterpret_cast<const jbyte*>(mac));
-                            callFrame->setResult(arr);
+e->SetByteArrayRegion(arr，0，6，reinterpret_cast<const jbyte*>(mac))；
+callFrame->setResult(arr)；
                         });
                     }
-                    env->DeleteLocalRef(niClass);
+env->DeleteLocalRef(niClass)；
                 }
             }
         }
 
-        class FingerprintSpoofModule : public zygisk::ModuleBase {
-        public:
-            void onLoad(Api *api, JNIEnv *env) override { this->api = api; this->env = env; }
-            void postAppSpecialize(const AppSpecializeArgs *args) override {
-                uid_t uid = getuid();
-                fetch_rule_from_kernel(uid);
-                if (!g_hasRule) return;
+类FingerprintSpoofModule:public zygisk：：ModuleBase{
+公共：
+void onLoad(Api*api，JNIEnv*env)覆盖{this->api=api；this->env=env；}
+void postAppSpecialize(常量AppSpecializeArgs*args)覆盖{
+UID_tuid=getuid()；
+fetch_rule_from_kernel(uid)；
+if(！G_hasRule)返回；
 
-                pine::Pine::init();
-                hook_java_methods(env);
+pine：：Pine：：init()；
+hook_java_methods(env)；
 
-                if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
+if(api)api->setOption(zygisk：：Api：：Option：：dlclose_MODULE_LIBRARY)；
             }
-        private:
-            Api *api = nullptr; JNIEnv *env = nullptr;
+私人的：
+API*api=nullptr；JNIEnv*env=nullptr；
         };
 
-        REGISTER_ZYGISK_MODULE(FingerprintSpoofModule)
-        JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
-        EOF
+register_ZYGISK_MODULE(指纹SPOOFModule)
+JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM*vm，void*){return JNI_VERSION_1_6；}
+EOF
 
-    - name: 6. 编译 Zygisk 模块
-      run: |
-        mkdir build && cd build
-        cmake .. \
-          -DCMAKE_TOOLCHAIN_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake \
-          -DANDROID_ABI=arm64-v8a \
+-姓名：6.编译Zygisk模块
+跑：|
+mkdir生成&&cd生成
+CMake..\
+-DCMAKE_toolchain_FILE=$ANDROID_NDK_HOME/build/cmake/android.toolchain.cmake\
+-DANDROID_ABI=arm64-v8a\
           -DANDROID_PLATFORM=android-30 \
-          -DCMAKE_BUILD_TYPE=Release
-        make -j2
+-DCMAKE_BUILD_TYPE=发布
+make-j2
 
-    - name: 7. 打包成 Magisk / KernelSU 模块 Zip
-      run: |
-        mkdir -p module/zygisk/arm64-v8a
-        cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
+-姓名：7.打包成Magisk/KernelSu模块Zip
+跑: |
+mkdir-p模块/zygisk/arm64-v8a
+CP构建/libfinger_spoof_zygisk.so模块/zygisk/arm64-v8a/liboplus_sensor.so
         
-        cat << 'EOF' > module/module.prop
-        id=fp_sensor
-        name=OPLUS Sensor Helper
+cat<<'EOF'>模块/module.prop
+ID=fp_sensor
+name=oplus传感器助手
         version=v1.0
-        versionCode=1
-        author=Anonymous
-        description=Hardware abstraction layer for oplus.
-        EOF
+版本代码=1
+作者=匿名
+说明=ompus的硬件抽象层。
+EOF
         
-        cd module
-        zip -r ../FP_Zygisk_Module.zip *
+CD模块
+zip-r../FP_Zygisk_module.zip*
 
-    - name: 8. 上传模块压缩包 (Artifact)
-      uses: actions/upload-artifact@v4
-      with:
-        name: FP_Zygisk_Module
-        path: FP_Zygisk_Module.zip
+-姓名：8.上传模块压缩包(工件)
+uses：操作/上载工件@v4
+和……一起:
+姓名: FP_Zygisk_Module
+路径: FP_Zygisk_Module.zip

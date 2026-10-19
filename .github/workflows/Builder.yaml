@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (ShadowHook 源码暴力修复版)
+name: 一键编译 Zygisk 模块 (纯 C++ 直捣黄龙最终版)
 
 on:
   workflow_dispatch:
@@ -19,41 +19,41 @@ jobs:
         mkdir -p third_party
         git clone --depth 1 https://github.com/bytedance/android-inline-hook.git third_party/shadowhook
 
-        # 魔改 ShadowHook 的 CMake 版本限制
-        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
-        if [ -f "$SHADOWHOOK_CMAKE" ]; then
-            sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
-        fi
+        # 核心修复：强行伪造 sh_config.h 骗过编译器
+        cat << 'EOF' > third_party/shadowhook/shadowhook/src/main/cpp/sh_config.h
+        #pragma once
+        #define SHADOWHOOK_VERSION "2.0.1"
+        #define SHADOWHOOK_MODE_SHARED 1
+        #define SHADOWHOOK_MODE_UNIQUE 2
+        EOF
 
-    - name: 3. 生成 CMakeLists.txt (暴力过滤)
+    - name: 3. 生成 CMakeLists.txt (添加所有内部路径)
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
-        # 把 ShadowHook 所有可能的头文件目录全塞进去
+        # 把 ShadowHook 所有可能的内部源码目录全加进去，断绝找不到头文件的问题
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
             ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp
             ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/arch
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/arch/include
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/third_party/xdl/include
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/third_party/xz-embedded/linux/include
+            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/third_party/xz-embedded/userspace
         )
 
-        # 收集所有 .c 文件
+        # 收集源码
         file(GLOB_RECURSE SHADOWHOOK_SOURCES 
             "${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/*.c"
         )
         
-        # 暴力剔除所有非 arm64 的架构代码和无关工具
+        # 剔除所有非 arm64 的架构代码和无关工具
         list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/arch/arm/.*")
         list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/arch/x86/.*")
         list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/arch/x86_64/.*")
         list(FILTER SHADOWHOOK_SOURCES EXCLUDE REGEX ".*/clear-cache-tool.*")
-        
-        # 打印一下留下来的文件，方便确认
-        message(STATUS "ShadowHook 编译文件: ${SHADOWHOOK_SOURCES}")
 
         add_library(shadowhook STATIC ${SHADOWHOOK_SOURCES})
         target_link_libraries(shadowhook log)
@@ -93,7 +93,7 @@ jobs:
         }
         EOF
 
-    - name: 5. 生成核心 zygisk.cpp (纯 C++ 桥接 Hook)
+    - name: 5. 生成核心 zygisk.cpp
       run: |
         cat << 'EOF' > zygisk.cpp
         #include <jni.h>

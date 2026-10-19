@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (ShadowHook 终极定稿版)
+name: 一键编译 Zygisk 模块 (预编译终极稳定版)
 
 on:
   workflow_dispatch:
@@ -9,10 +9,10 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - name: 1. 检出并解压
+    - name: 1. 检出并解压你的依赖包
       uses: actions/checkout@v4
       
-    - name: 2. 解压并校正目录结构
+    - name: 2. 解压 third_party.zip
       run: |
         unzip -q third_party.zip
         if [ ! -d "third_party" ]; then
@@ -20,111 +20,68 @@ jobs:
             mv lsplant dobby xdl zygisk third_party/ 2>/dev/null || true
         fi
 
-    - name: 3. 下载 ShadowHook 源码
+    - name: 3. 下载官方预编译库 (免去源码编译报错)
       run: |
-        mkdir -p third_party
-        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
-        if [ -f shadowhook.zip ]; then
-            unzip -q shadowhook.zip
-            EXTRACTED_DIR=$(ls -d */ | grep -E "android-inline-hook" | head -n 1)
-            if [ -n "$EXTRACTED_DIR" ]; then
-                mv "$EXTRACTED_DIR" third_party/shadowhook
-            fi
-        fi
+        mkdir -p third_party/prebuilt/lsplant
+        mkdir -p third_party/prebuilt/shadowhook
+        
+        # 从 Maven 官方源下载 LSPlant 预编译包
+        echo "下载 LSPlant 预编译包..."
+        wget -q https://repo1.maven.org/maven2/org/lsposed/lsplant/lsplant-standalone/6.4/lsplant-standalone-6.4.aar -O lsplant.aar
+        unzip -q lsplant.aar -d third_party/prebuilt/lsplant
+        
+        # 从 Maven 官方源下载 ShadowHook 预编译包
+        echo "下载 ShadowHook 预编译包..."
+        wget -q https://repo1.maven.org/maven2/com/bytedance/android/shadowhook/2.0.1/shadowhook-2.0.1.aar -O shadowhook.aar
+        unzip -q shadowhook.aar -d third_party/prebuilt/shadowhook
 
-    - name: 4. 覆盖为经典稳定版 LSPlant (解决 Modules 报错)
-      run: |
-        echo "强制替换为 v1.0.0 经典版 LSPlant..."
-        rm -rf third_party/lsplant
-        wget -q https://github.com/LSPosed/LSPlant/archive/refs/tags/v1.0.0.zip -O lsplant_v1.zip
-        unzip -q lsplant_v1.zip
-        mv LSPlant-1.0.0 third_party/lsplant
-        echo "✅ 已替换为经典版"
-
-    - name: 5. 准备 NDK
+    - name: 4. 准备 NDK
       uses: nttld/setup-ndk@v1
       with:
         ndk-version: r25c
 
-    - name: 6. 修补依赖与魔改 CMake
-      run: |
-        # 1. 魔改 ShadowHook 的 CMake 版本限制
-        SHADOWHOOK_CMAKE="third_party/shadowhook/shadowhook/src/main/cpp/CMakeLists.txt"
-        if [ -f "$SHADOWHOOK_CMAKE" ]; then
-            sed -i 's/cmake_minimum_required(VERSION [0-9.]*)/cmake_minimum_required(VERSION 3.10)/g' $SHADOWHOOK_CMAKE
-        fi
-
-        # 2. 修补 LSPlant 的 xz 依赖
-        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
-        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
-        
-        UTILS_DIR=$(find third_party/lsplant -type d -name "utils" | head -n 1)
-        if [ -n "$UTILS_DIR" ]; then
-            cat << 'EOF' > $UTILS_DIR/xz.h
-        #pragma once
-        #include <stddef.h>
-        #include <stdint.h>
-        #ifdef __cplusplus
-        extern "C" {
-        #endif
-        enum xz_mode { XZ_SINGLE, XZ_PREALLOC, XZ_DYNALLOC };
-        enum xz_ret { XZ_OK, XZ_STREAM_END, XZ_MEMLIMIT_ERROR, XZ_FORMAT_ERROR, XZ_OPTIONS_ERROR, XZ_DATA_ERROR, XZ_BUF_ERROR };
-        struct xz_buf { const uint8_t *in; size_t in_pos; size_t in_size; uint8_t *out; size_t out_pos; size_t out_size; };
-        struct xz_dec;
-        struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max);
-        enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b);
-        void xz_dec_end(struct xz_dec *s);
-        void xz_crc32_init(void);
-        #ifdef __cplusplus
-        }
-        #endif
-        EOF
-            cat << 'EOF' > $UTILS_DIR/xz_stub.c
-        #include "xz.h"
-        struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max) { return 0; }
-        enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b) { return XZ_DATA_ERROR; }
-        void xz_dec_end(struct xz_dec *s) {}
-        void xz_crc32_init(void) {}
-        EOF
-        fi
-
-    - name: 7. 生成 CMakeLists.txt
+    - name: 5. 生成主 CMakeLists.txt
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 17)
         
+        # 1. 引入头文件
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
             ${CMAKE_SOURCE_DIR}/third_party/xdl/include
             ${CMAKE_SOURCE_DIR}/third_party/xdl/src
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
+            # 引用解压出来的预编译头文件
+            ${CMAKE_SOURCE_DIR}/third_party/prebuilt/lsplant/prefab/modules/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/prebuilt/shadowhook/prefab/modules/shadowhook/include
         )
         
-        # 强制静态编译 ShadowHook
-        set(SHADOWHOOK_STATIC ON CACHE BOOL "")
-        add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
+        # 2. 链接预编译静态库
+        # LSPlant
+        add_library(lsplant STATIC IMPORTED)
+        set_target_properties(lsplant PROPERTIES IMPORTED_LOCATION
+            ${CMAKE_SOURCE_DIR}/third_party/prebuilt/lsplant/prefab/modules/lsplant/libs/android.arm64-v8a/liblsplant.a
+        )
+        # ShadowHook
+        add_library(shadowhook STATIC IMPORTED)
+        set_target_properties(shadowhook PROPERTIES IMPORTED_LOCATION
+            ${CMAKE_SOURCE_DIR}/third_party/prebuilt/shadowhook/prefab/modules/shadowhook/libs/android.arm64-v8a/libshadowhook.a
+        )
 
-        # 1. xdl
+        # 3. xdl 源码(仅用于查找符号，极小)
         file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 2. LSPlant (v1.0.0 结构非常规整)
-        file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/*.cc")
-        file(GLOB_RECURSE LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
-        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
-        target_link_libraries(lsplant xdl)
-
-        # 3. Zygisk 模块
+        # 4. Zygisk 模块
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
-        target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook)
+        # 必须加上 c++_shared，因为预编译库是用它编译的
+        target_link_libraries(finger_spoof_zygisk log android lsplant xdl shadowhook c++_shared)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
         EOF
 
-    - name: 8. 生成 zygisk.cpp 和 zygisk.hpp
+    - name: 6. 生成 zygisk.cpp 和 zygisk.hpp
       run: |
         cat << 'EOF' > zygisk.hpp
         #pragma once
@@ -310,7 +267,7 @@ jobs:
         JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
         EOF
 
-    - name: 9. 编译 Zygisk 模块
+    - name: 7. 编译 Zygisk 模块
       run: |
         mkdir build && cd build
         cmake .. \
@@ -320,10 +277,14 @@ jobs:
           -DCMAKE_BUILD_TYPE=Release
         make
 
-    - name: 10. 打包成 Magisk / KernelSU 模块 Zip
+    - name: 8. 打包成 Magisk / KernelSU 模块 Zip (附带 c++_shared.so)
       run: |
         mkdir -p module/zygisk/arm64-v8a
         cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
+        
+        # 拷贝 c++ 运行库防止依赖缺失
+        CXX_SHARED=$(find $ANDROID_NDK_HOME -name "libc++_shared.so" | grep arm64-v8a | head -n 1)
+        cp "$CXX_SHARED" module/zygisk/arm64-v8a/
         
         cat << 'EOF' > module/module.prop
         id=fp_sensor
@@ -337,7 +298,7 @@ jobs:
         cd module
         zip -r ../FP_Zygisk_Module.zip *
 
-    - name: 11. 上传模块压缩包 (Artifact)
+    - name: 9. 上传模块压缩包 (Artifact)
       uses: actions/upload-artifact@v4
       with:
         name: FP_Zygisk_Module

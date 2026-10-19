@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (LSPlant Java Hook 终极版)
+name: 一键编译 Zygisk 模块 (LSPlant Java Hook 终极防断连版)
 
 on:
   workflow_dispatch:
@@ -15,13 +15,30 @@ jobs:
       with:
         ndk-version: r25c
 
-    - name: 2. 下载 LSPlant、Dobby 和 xdl
+    - name: 2. 下载依赖 (带备用下载源，防止 GitHub 风控)
       run: |
         mkdir -p third_party
-        git clone --depth 1 https://github.com/LSPosed/LSPlant.git third_party/lsplant
-        git clone --depth 1 https://github.com/jmpews/Dobby.git third_party/dobby
-        # xdl 用于找 libart.so 里的符号
-        git clone --depth 1 https://github.com/LSPosed/xdl.git third_party/xdl
+        
+        # 1. 下载 LSPlant
+        git clone --depth 1 https://github.com/LSPosed/LSPlant.git third_party/lsplant || (
+          echo "git clone LSPlant 失败，尝试 wget..."
+          wget -q https://github.com/LSPosed/LSPlant/archive/refs/heads/master.zip -O lsplant.zip
+          unzip -q lsplant.zip && mv LSPlant-master third_party/lsplant
+        )
+        
+        # 2. 下载 Dobby
+        git clone --depth 1 https://github.com/jmpews/Dobby.git third_party/dobby || (
+          echo "git clone Dobby 失败，尝试 wget..."
+          wget -q https://github.com/jmpews/Dobby/archive/refs/heads/master.zip -O dobby.zip
+          unzip -q dobby.zip && mv Dobby-master third_party/dobby
+        )
+        
+        # 3. 下载 xdl (原 LSPosed/xdl 已失效，换用 hexhacking/xDL 稳定版)
+        git clone --depth 1 https://github.com/hexhacking/xDL.git third_party/xdl || (
+          echo "git clone xdl 失败，尝试 wget..."
+          wget -q https://github.com/hexhacking/xDL/archive/refs/heads/master.zip -O xdl.zip
+          unzip -q xdl.zip && mv xDL-master third_party/xdl
+        )
 
     - name: 3. 生成 zygisk.hpp
       run: |
@@ -105,7 +122,6 @@ jobs:
 
         # ===== 3. 编译 LSPlant =====
         file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/*.cc")
-        # LSPlant 内部依赖 xz 解压
         file(GLOB_RECURSE LSPLANT_XZ_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/external/xz-embedded/linux/lib/*.c")
         add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_XZ_SOURCES})
         target_include_directories(lsplant PRIVATE 
@@ -216,7 +232,7 @@ jobs:
                                 }
                                 e->ReleaseStringUTFChars(name, c_name);
                             }
-                            return nullptr; // 返回 null 表示走原方法
+                            return nullptr;
                         });
                     }
                     env->DeleteLocalRef(secureClass);
@@ -247,7 +263,6 @@ jobs:
                 fetch_rule_from_kernel(uid);
                 if (!g_hasRule) return;
 
-                // 初始化 LSPlant
                 lsplant::InitInfo info {
                     .inline_hooker = inline_hooker,
                     .inline_unhooker = inline_unhooker,
@@ -257,7 +272,6 @@ jobs:
                 
                 hook_java_methods(env);
 
-                // 卸载模块内存映射，极限隐蔽
                 if (api) api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY);
             }
         private:

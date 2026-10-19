@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (ShadowHook 智能识别版)
+name: 一键编译 Zygisk 模块 (ShadowHook 终极定稿版)
 
 on:
   workflow_dispatch:
@@ -23,18 +23,23 @@ jobs:
     - name: 3. 下载 ShadowHook 源码 (智能识别目录名)
       run: |
         mkdir -p third_party
-        # 下载最新的 shadowhook 源码
-        wget -q https://github.com/bytedance/shadowhook/archive/refs/heads/master.zip -O shadowhook.zip
-        unzip -q shadowhook.zip
+        echo "下载 ShadowHook (main 分支)..."
+        wget -q https://github.com/bytedance/android-inline-hook/archive/refs/heads/main.zip -O shadowhook.zip
         
-        # 智能匹配解压出来的文件夹名字（可能是 shadowhook-master 或 android-inline-hook-master）
-        EXTRACTED_DIR=$(ls -d */ | grep -E "shadowhook|inline-hook" | head -n 1)
-        if [ -n "$EXTRACTED_DIR" ]; then
-            mv "$EXTRACTED_DIR" third_party/shadowhook
-            echo "成功将 $EXTRACTED_DIR 重命名为 third_party/shadowhook"
+        if [ -f shadowhook.zip ]; then
+            unzip -q shadowhook.zip
+            # 不管解压出来叫什么，匹配到 android-inline-hook 就重命名
+            EXTRACTED_DIR=$(ls -d */ | grep -E "android-inline-hook" | head -n 1)
+            if [ -n "$EXTRACTED_DIR" ]; then
+                mv "$EXTRACTED_DIR" third_party/shadowhook
+                echo "✅ 成功将 $EXTRACTED_DIR 重命名为 third_party/shadowhook"
+            else
+                echo "❌ 找不到解压出来的 ShadowHook 目录！"
+                ls -la
+                exit 1
+            fi
         else
-            echo "❌ 找不到解压出来的 ShadowHook 目录！"
-            ls -la
+            echo "❌ 下载失败，请检查网络！"
             exit 1
         fi
 
@@ -95,7 +100,7 @@ jobs:
             ${CMAKE_SOURCE_DIR}/third_party/shadowhook/shadowhook/src/main/cpp/include
         )
         
-        # 配置 ShadowHook 为静态库
+        # 强制静态编译 ShadowHook
         set(SHADOWHOOK_STATIC ON CACHE BOOL "")
         add_subdirectory(third_party/shadowhook/shadowhook/src/main/cpp)
 
@@ -208,6 +213,7 @@ jobs:
 
         // 使用 ShadowHook 进行内联 Hook
         void* inline_hooker(void* target, void* hooker) {
+            // shadowhook_hook_func_addr: 通过绝对地址 Hook 一个函数
             return shadowhook_hook_func_addr(target, hooker, nullptr);
         }
 
@@ -288,9 +294,10 @@ jobs:
                 fetch_rule_from_kernel(uid);
                 if (!g_hasRule) return;
 
-                // 初始化 ShadowHook
-                shadowhook_init(shadowhook_mode_t::SHADOWHOOK_MODE_SHARED, false);
+                // 初始化 ShadowHook (共享模式)
+                shadowhook_init(SHADOWHOOK_MODE_SHARED, false);
 
+                // 初始化 LSPlant 并传入 ShadowHook 作为引擎
                 lsplant::InitInfo info {
                     .inline_hooker = inline_hooker,
                     .inline_unhooker = inline_unhooker,

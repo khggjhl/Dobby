@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (最终极简版)
+name: 一键编译 Zygisk 模块 (终极暴击版)
 
 on:
   workflow_dispatch:
@@ -27,7 +27,6 @@ jobs:
 
     - name: 4. 修补 LSPlant 的 xz 依赖
       run: |
-        # 阻止 lsplant 去寻找系统 linux/xz.h，替换为本地空实现
         find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
         find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
         
@@ -61,7 +60,7 @@ jobs:
         EOF
         fi
 
-    - name: 5. 生成 CMakeLists.txt (包含终极过滤规则)
+    - name: 5. 生成 CMakeLists.txt (终极过滤 + 补全路径)
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
@@ -70,15 +69,16 @@ jobs:
         
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
-            # Dobby 完整路径
+            # Dobby 所有内部深层路径全加进来
             ${CMAKE_SOURCE_DIR}/third_party/dobby
             ${CMAKE_SOURCE_DIR}/third_party/dobby/include
             ${CMAKE_SOURCE_DIR}/third_party/dobby/source
-            # xdl 完整路径
+            ${CMAKE_SOURCE_DIR}/third_party/dobby/source/core
+            # xdl
             ${CMAKE_SOURCE_DIR}/third_party/xdl
             ${CMAKE_SOURCE_DIR}/third_party/xdl/include
             ${CMAKE_SOURCE_DIR}/third_party/xdl/src
-            # LSPlant 完整路径
+            # LSPlant
             ${CMAKE_SOURCE_DIR}/third_party/lsplant
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant
@@ -86,21 +86,19 @@ jobs:
             ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
         )
         
-        # 1. 编译 Dobby (剔除所有非 Android ARM64 的代码)
+        # 1. 编译 Dobby
         file(GLOB_RECURSE DOBBY_SOURCES 
             "${CMAKE_SOURCE_DIR}/third_party/dobby/source/*.c"
             "${CMAKE_SOURCE_DIR}/third_party/dobby/source/*.cc"
         )
-        # 剔除 Windows, Darwin, 内核态等无关平台代码
+        # 把所有无用的平台、架构、和那个气人的缓存工具全干掉！
         list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/KernelMode/.*")
         list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/Windows/.*")
         list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/Darwin/.*")
-        # 剔除 32 位/其它架构代码
         list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/x86/.*")
         list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/x86_64/.*")
         list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/arm/.*")
-        # 专门剔除那个报错的 arm 假占位文件
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*clear-cache-tool-arm-dummy.cc")
+        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/clear-cache-tool/.*") # 整个目录排除
         
         add_library(dobby STATIC ${DOBBY_SOURCES})
         target_link_libraries(dobby log)

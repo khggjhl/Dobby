@@ -64,7 +64,7 @@ jobs:
         sed -i 's/ ScopedLocalClassRef / pine::ScopedLocalClassRef /g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
         sed -i 's/(ScopedLocalClassRef/(pine::ScopedLocalClassRef/g' third_party/pine/core/src/main/cpp/jni_bridge.cpp
 
-        # 【修复3】解决 xz.h 缺失问题
+        # 【修复3】解决 xz.h 缺失问题，加入 xz_crc32_init
         sed -i 's|#include <linux/xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
         sed -i 's|#include <xz.h>|#include "xz.h"|' third_party/pine/core/src/main/cpp/utils/elf_image.cpp
         
@@ -83,6 +83,8 @@ jobs:
         struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max);
         enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b);
         void xz_dec_end(struct xz_dec *s);
+        // 【补全】增加 xz_crc32_init 声明
+        void xz_crc32_init(void);
         #ifdef __cplusplus
         }
         #endif
@@ -93,6 +95,8 @@ jobs:
         struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max) { return 0; }
         enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b) { return XZ_DATA_ERROR; }
         void xz_dec_end(struct xz_dec *s) {}
+        // 【补全】增加空实现
+        void xz_crc32_init(void) {}
         EOF
 
     - name: 3. 生成 zygisk.hpp
@@ -170,7 +174,7 @@ jobs:
             "${CMAKE_SOURCE_DIR}/third_party/pine/core/src/main/cpp/utils/xz_stub.c"
         )
 
-        # 剔除其他架构的代码
+        # 剔除不兼容的架构
         list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/thumb2.cpp")
         list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/arm32.cpp")
         list(FILTER PINE_SOURCES EXCLUDE REGEX ".*/x86.cpp")
@@ -178,7 +182,8 @@ jobs:
 
         add_library(pine STATIC ${PINE_SOURCES})
         target_link_libraries(pine log)
-        target_compile_options(pine PRIVATE -Wno-format -Wno-nontrivial-memcall)
+        # 【修复4】修正警告参数 -Wno-nontrivial-memcall -> -Wno-nontrivial-memaccess
+        target_compile_options(pine PRIVATE -Wno-format -Wno-nontrivial-memaccess)
 
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android pine)

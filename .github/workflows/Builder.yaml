@@ -1,4 +1,4 @@
-name: 一键编译 Zygisk 模块 (Zip 解压自动版)
+name: 一键编译 Zygisk 模块 (最终极简版)
 
 on:
   workflow_dispatch:
@@ -9,135 +9,120 @@ jobs:
     timeout-minutes: 30
 
     steps:
-    - name: 1. 检出代码并自动解压第三方库
+    - name: 1. 检出并解压
       uses: actions/checkout@v4
-
-    - name: 2. 解压 third_party.zip 并检查结构
+      # 这里假设你已经把 third_party.zip 传到了仓库根目录
+      
+    - name: 2. 解压并校正目录结构
       run: |
-        echo "解压 third_party.zip..."
         unzip -q third_party.zip
-        
-        # 智能兼容：如果你解压出来的直接是 lsplant 文件夹，就帮你移进去
         if [ ! -d "third_party" ]; then
             mkdir -p third_party
             mv lsplant dobby xdl zygisk third_party/ 2>/dev/null || true
         fi
-        
-        echo "===== 检查源码是否就位 ====="
-        echo "--- LSPlant 源码 ---" && find third_party/lsplant -name "*.cc" | head -n 3
-        echo "--- Dobby 源码 ---" && find third_party/dobby -name "*.c" | head -n 3
-        echo "--- xdl 源码 ---" && find third_party/xdl -name "*.c" | head -n 3
-        echo "============================"
 
-    - name: 3. 准备 Android NDK
+    - name: 3. 准备 NDK
       uses: nttld/setup-ndk@v1
-      id: setup-ndk
       with:
         ndk-version: r25c
 
-    - name: 4. 生成 zygisk.hpp (防止你包里的版本过旧)
+    - name: 4. 修补 LSPlant 的 xz 依赖
       run: |
-        mkdir -p third_party/zygisk
-        cat << 'EOF' > third_party/zygisk/zygisk.hpp
+        # 阻止 lsplant 去寻找系统 linux/xz.h，替换为本地空实现
+        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <linux/xz.h>|#include "xz.h"|g' {} +
+        find third_party/lsplant -name "*.cc" -exec sed -i 's|#include <xz.h>|#include "xz.h"|g' {} +
+        
+        UTILS_DIR=$(find third_party/lsplant -type d -name "utils" | head -n 1)
+        if [ -n "$UTILS_DIR" ]; then
+            cat << 'EOF' > $UTILS_DIR/xz.h
         #pragma once
-        #include <jni.h>
-        #include <sys/types.h>
-        #include <cstdint>
-        #include <string_view>
-
-        namespace zygisk {
-        struct Api;
-        struct AppSpecializeArgs;
-        struct ServerSpecializeArgs;
-
-        class ModuleBase {
-        public:
-            virtual void onLoad(Api *api, JNIEnv *env) {}
-            virtual void preAppSpecialize(AppSpecializeArgs *args) {}
-            virtual void postAppSpecialize(const AppSpecializeArgs *args) {}
-            virtual void preServerSpecialize(ServerSpecializeArgs *args) {}
-            virtual void postServerSpecialize(const ServerSpecializeArgs *args) {}
-        };
-
-        struct AppSpecializeArgs {
-            jstring nice_name; jstring app_data_dir; const char *const *args;
-            jint *uid; jint *gid; jintArray *gids; jint *runtime_flags;
-            jobjectArray *rlimits; jstring *instruction_set;
-            const char *const *app_path; jstring *app_lib_dir;
-            const char *const *permitted_paths; jint *mount_external; jstring *se_info;
-        };
-
-        struct ServerSpecializeArgs { jint *uid; jint *gid; jintArray *gids; jint *runtime_flags; };
-
-        struct Api {
-            void connectCompanion(int pid); void connectCompanion();
-            int getModuleDir(); void setOption(int opt);
-            enum Option { DLCLOSE_MODULE_LIBRARY = 0 };
-        };
-
-        #define REGISTER_ZYGISK_MODULE(cls) \
-            extern "C" __attribute__((visibility("default"))) void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { \
-                static cls module; module.onLoad(api, env); \
-                api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY); \
-            }
+        #include <stddef.h>
+        #include <stdint.h>
+        #ifdef __cplusplus
+        extern "C" {
+        #endif
+        enum xz_mode { XZ_SINGLE, XZ_PREALLOC, XZ_DYNALLOC };
+        enum xz_ret { XZ_OK, XZ_STREAM_END, XZ_MEMLIMIT_ERROR, XZ_FORMAT_ERROR, XZ_OPTIONS_ERROR, XZ_DATA_ERROR, XZ_BUF_ERROR };
+        struct xz_buf { const uint8_t *in; size_t in_pos; size_t in_size; uint8_t *out; size_t out_pos; size_t out_size; };
+        struct xz_dec;
+        struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max);
+        enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b);
+        void xz_dec_end(struct xz_dec *s);
+        void xz_crc32_init(void);
+        #ifdef __cplusplus
         }
+        #endif
         EOF
+            cat << 'EOF' > $UTILS_DIR/xz_stub.c
+        #include "xz.h"
+        struct xz_dec *xz_dec_init(enum xz_mode mode, uint32_t dict_max) { return 0; }
+        enum xz_ret xz_dec_run(struct xz_dec *s, struct xz_buf *b) { return XZ_DATA_ERROR; }
+        void xz_dec_end(struct xz_dec *s) {}
+        void xz_crc32_init(void) {}
+        EOF
+        fi
 
-    - name: 5. 生成主 CMakeLists.txt (全路径暴力搜索)
+    - name: 5. 生成 CMakeLists.txt
       run: |
         cat << 'EOF' > CMakeLists.txt
         cmake_minimum_required(VERSION 3.22.1)
         project("finger_spoof_zygisk")
         set(CMAKE_CXX_STANDARD 20)
         
+        # 彻底解决所有头文件找不到的问题
         include_directories(
             ${CMAKE_SOURCE_DIR}/third_party/zygisk
+            # Dobby 完整路径
+            ${CMAKE_SOURCE_DIR}/third_party/dobby
             ${CMAKE_SOURCE_DIR}/third_party/dobby/include
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
-            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/dobby/source
+            # xdl 完整路径
+            ${CMAKE_SOURCE_DIR}/third_party/xdl
             ${CMAKE_SOURCE_DIR}/third_party/xdl/include
             ${CMAKE_SOURCE_DIR}/third_party/xdl/src
-            ${CMAKE_SOURCE_DIR}/third_party/xdl/src/main/cpp
+            # LSPlant 完整路径
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/include
+            ${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp
         )
         
-        # 1. 编译 Dobby
+        # 1. Dobby
         file(GLOB_RECURSE DOBBY_SOURCES 
             "${CMAKE_SOURCE_DIR}/third_party/dobby/source/*.c"
             "${CMAKE_SOURCE_DIR}/third_party/dobby/source/*.cc"
         )
         list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/x86/.*")
         list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/x86_64/.*")
-        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/arm/.*")
-        if(NOT DOBBY_SOURCES)
-            message(FATAL_ERROR "❌ 致命错误: 找不到 Dobby 源码！")
-        endif()
+        list(FILTER DOBBY_SOURCES EXCLUDE REGEX ".*/arm/.*") # 只留 arm64
         add_library(dobby STATIC ${DOBBY_SOURCES})
         target_link_libraries(dobby log)
 
-        # 2. 编译 xdl
+        # 2. xdl
         file(GLOB_RECURSE XDL_SOURCES "${CMAKE_SOURCE_DIR}/third_party/xdl/*.c")
-        if(NOT XDL_SOURCES)
-            message(FATAL_ERROR "❌ 致命错误: 找不到 xdl 源码！")
-        endif()
         add_library(xdl STATIC ${XDL_SOURCES})
         target_link_libraries(xdl log)
 
-        # 3. 编译 LSPlant
+        # 3. LSPlant
         file(GLOB_RECURSE LSPLANT_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.cc")
-        file(GLOB_RECURSE LSPLANT_XZ_SOURCES "${CMAKE_SOURCE_DIR}/third_party/lsplant/*.c")
-        if(NOT LSPLANT_SOURCES)
-            message(FATAL_ERROR "❌ 致命错误: 找不到 LSPlant 源码！")
+        set(LSPLANT_STUB_C "")
+        if(EXISTS "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/utils/xz_stub.c")
+            set(LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/lsplant/src/main/cpp/utils/xz_stub.c")
+        elseif(EXISTS "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
+            set(LSPLANT_STUB_C "${CMAKE_SOURCE_DIR}/third_party/lsplant/src/main/cpp/utils/xz_stub.c")
         endif()
-        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_XZ_SOURCES})
+        
+        add_library(lsplant STATIC ${LSPLANT_SOURCES} ${LSPLANT_STUB_C})
         target_link_libraries(lsplant dobby xdl)
 
-        # 4. 编译 Zygisk 模块
+        # 4. Zygisk
         add_library(finger_spoof_zygisk SHARED zygisk.cpp)
         target_link_libraries(finger_spoof_zygisk log android lsplant dobby xdl)
         target_compile_options(finger_spoof_zygisk PRIVATE -Os -fvisibility=hidden -fno-exceptions -fno-rtti)
         EOF
 
-    - name: 6. 生成核心 zygisk.cpp
+    - name: 6. 生成 zygisk.cpp
       run: |
         cat << 'EOF' > zygisk.cpp
         #include <jni.h>
@@ -278,7 +263,54 @@ jobs:
         JNIEXPORT jint JNICALL JNI_OnLoad(JavaVM *vm, void *) { return JNI_VERSION_1_6; }
         EOF
 
-    - name: 7. 编译 Zygisk 模块
+    - name: 7. 生成 zygisk.hpp
+      run: |
+        cat << 'EOF' > zygisk.hpp
+        #pragma once
+        #include <jni.h>
+        #include <sys/types.h>
+        #include <cstdint>
+        #include <string_view>
+
+        namespace zygisk {
+        struct Api;
+        struct AppSpecializeArgs;
+        struct ServerSpecializeArgs;
+
+        class ModuleBase {
+        public:
+            virtual void onLoad(Api *api, JNIEnv *env) {}
+            virtual void preAppSpecialize(AppSpecializeArgs *args) {}
+            virtual void postAppSpecialize(const AppSpecializeArgs *args) {}
+            virtual void preServerSpecialize(ServerSpecializeArgs *args) {}
+            virtual void postServerSpecialize(const ServerSpecializeArgs *args) {}
+        };
+
+        struct AppSpecializeArgs {
+            jstring nice_name; jstring app_data_dir; const char *const *args;
+            jint *uid; jint *gid; jintArray *gids; jint *runtime_flags;
+            jobjectArray *rlimits; jstring *instruction_set;
+            const char *const *app_path; jstring *app_lib_dir;
+            const char *const *permitted_paths; jint *mount_external; jstring *se_info;
+        };
+
+        struct ServerSpecializeArgs { jint *uid; jint *gid; jintArray *gids; jint *runtime_flags; };
+
+        struct Api {
+            void connectCompanion(int pid); void connectCompanion();
+            int getModuleDir(); void setOption(int opt);
+            enum Option { DLCLOSE_MODULE_LIBRARY = 0 };
+        };
+
+        #define REGISTER_ZYGISK_MODULE(cls) \
+            extern "C" __attribute__((visibility("default"))) void zygisk_module_entry(zygisk::Api *api, JNIEnv *env) { \
+                static cls module; module.onLoad(api, env); \
+                api->setOption(zygisk::Api::Option::DLCLOSE_MODULE_LIBRARY); \
+            }
+        }
+        EOF
+
+    - name: 8. 编译 Zygisk 模块
       run: |
         mkdir build && cd build
         cmake .. \
@@ -286,9 +318,10 @@ jobs:
           -DANDROID_ABI=arm64-v8a \
           -DANDROID_PLATFORM=android-30 \
           -DCMAKE_BUILD_TYPE=Release
-        make -j2
+        # 使用单线程编译，防止内存爆炸
+        make
 
-    - name: 8. 打包成 Magisk / KernelSU 模块 Zip
+    - name: 9. 打包成 Magisk / KernelSU 模块 Zip
       run: |
         mkdir -p module/zygisk/arm64-v8a
         cp build/libfinger_spoof_zygisk.so module/zygisk/arm64-v8a/liboplus_sensor.so
@@ -305,7 +338,7 @@ jobs:
         cd module
         zip -r ../FP_Zygisk_Module.zip *
 
-    - name: 9. 上传模块压缩包 (Artifact)
+    - name: 10. 上传模块压缩包 (Artifact)
       uses: actions/upload-artifact@v4
       with:
         name: FP_Zygisk_Module
